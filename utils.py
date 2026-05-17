@@ -443,7 +443,7 @@ def merge_energy_weather(smard: pd.DataFrame, weather: pd.DataFrame) -> pd.DataF
     - Strips tz info from weather before merging (both become naive, align correctly)
     - Filters weather to SMARD date range before merge — prevents the
       solar file's 2005-2026 history from diluting correlations with NaN rows
-      outside the SMARD window (Apr-Jun 2025).
+      outside the SMARD window.
     """
     w = weather.copy()
     if hasattr(w["Date"], "dt") and w["Date"].dt.tz is not None:

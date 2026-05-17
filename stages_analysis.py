@@ -138,28 +138,24 @@ def _(dwd_download_all, dwd_download_summary, mo):
 
 @app.cell
 def _(mo, pd):
-    # ── Load the three raw files for Hamburg (01975) ──────────────────────────
-    def _load_preview():
-        wind = pd.read_csv(
-            "data/dwd/01975_wind/produkt_ff_stunde_20241107_20260510_01975.txt",
-            sep=";", encoding="latin-1"
-        )
-        sun = pd.read_csv(
-            "data/dwd/01975_sun/produkt_sd_stunde_20241107_20260510_01975.txt",
-            sep=";", encoding="latin-1"
-        )
-        solar = pd.read_csv(
-            "data/dwd/01975_solar/produkt_st_stunde_20050101_20260430_01975.txt",
-            sep=";", encoding="latin-1"
-        )
-        # Strip whitespace from column names and values
-        for df in [wind, sun, solar]:
-            df.columns = df.columns.str.strip()
-        return wind, sun, solar
+    import glob
+    def _load_preview(station_id="01975"):
+        def _find(folder_suffix):
+            matches = glob.glob(f"data/dwd/{station_id}_{folder_suffix}/produkt_*.txt")
+            if not matches:
+                raise FileNotFoundError(
+                    f"No file found in data/dwd/{station_id}_{folder_suffix}/\n"
+                    f"Run dwd_download.py first."
+                )
+            return matches[0]
 
-    _wind, _sun, _solar = _load_preview()
+        _w = pd.read_csv(_find("wind"),  sep=";", encoding="latin-1")
+        _s = pd.read_csv(_find("sun"),   sep=";", encoding="latin-1")
+        _r = pd.read_csv(_find("solar"), sep=";", encoding="latin-1")
+        for _df in [_w, _s, _r]:
+            _df.columns = _df.columns.str.strip()
+        return _w, _s, _r
 
-    # ── Helper: dataframe → clean markdown table (first 4 rows) ──────────────
     def _df_to_md(df, n=4):
         _sub = df.head(n).copy()
         for col in _sub.columns:
@@ -172,6 +168,7 @@ def _(mo, pd):
         )
         return f"{_header}\n{_sep}\n{_rows}"
 
+    _wind, _sun, _solar = _load_preview()
     _wind_tbl  = _df_to_md(_wind)
     _sun_tbl   = _df_to_md(_sun)
     _solar_tbl = _df_to_md(_solar)
@@ -335,12 +332,12 @@ def _(
 ):
 
     def _run_smard():
-        _gen_raw = smard_load_raw("Actual_generation_202504010000_202507010000_Hour.csv")
-        _con_raw = smard_load_raw("Actual_consumption_202504010000_202507010000_Hour.csv")
+        _gen_raw = smard_load_raw("Actual_generation_202501010000_202601010000_Hour.csv")
+        _con_raw = smard_load_raw("Actual_consumption_202501010000_202601010000_Hour.csv")
         _gen = smard_add_features(smard_clean_generation(_gen_raw))
         _con = smard_clean_consumption(_con_raw)
         _df  = smard_merge(_gen, _con)
-        smard_save(_df, "cleaned_smard_q2_2025.csv")
+        smard_save(_df, "cleaned_smard_2025.csv")
         return _df
 
     _smard = _run_smard()
@@ -355,7 +352,7 @@ def _(
     | Sources tracked | Solar, Wind (on+offshore), Biomass, Hydro, Lignite, Hard Coal, Gas |
     | Overall renewable share | **{_smard["Total_Renewable"].sum() / _smard["Total_Generation"].sum() * 100:.1f}%** |
 
-    > Saved to `data/cleaned/cleaned_smard_q2_2025.csv`.
+    > Saved to `data/cleaned/cleaned_smard_2025.csv`.
     > All chart cells below load from this file — no re-downloading needed.
     """)
     return
@@ -392,7 +389,7 @@ def _(
 ):
 
     def _build_combined():
-        _s = smard_load("cleaned_smard_q2_2025.csv")
+        _s = smard_load("cleaned_smard_2025.csv")
         _w = dwd_load()
         return merge_energy_weather(_s, _w)
 
@@ -401,7 +398,7 @@ def _(
     _kpi_table = summary_to_markdown(_summary)
 
     mo.md(f"""
-    ### Key findings — April to June 2025
+    ### Key findings — Full Year 2025
 
     {_kpi_table}
 
@@ -420,8 +417,8 @@ def _(mo):
     > Each bar = one day. **Green = renewable**. **Brown = fossil fuels**.
     > Bar height = total daily generation in GWh (1 GWh powers ~1,000 homes for a day).
     >
-    > Watch how the green portion grows from April into June as solar gets stronger.
-    > On calm, cloudy days the brown portion expands — those are the days
+    > Watch how the green portion changes across the full year — solar peaks in summer,
+    > wind peaks in winter. On calm, cloudy days the brown portion expands — those are the days
     > gas and coal plants have to work hardest to keep the lights on.
     """)
     return
@@ -430,7 +427,7 @@ def _(mo):
 @app.cell
 def _(alt, pd, smard_aggregate_daily, smard_load):
     def _chart_stacked():
-        _d = smard_aggregate_daily(smard_load("cleaned_smard_q2_2025.csv"))
+        _d = smard_aggregate_daily(smard_load("cleaned_smard_2025.csv"))
         _m = pd.melt(
             _d[["Date","Total_Renewable","Total_Fossil"]].assign(
                 Total_Renewable=_d["Total_Renewable"]/1000,
@@ -458,7 +455,7 @@ def _(alt, pd, smard_aggregate_daily, smard_load):
                 alt.Tooltip("GWh:Q", title="GWh", format=".0f"),
             ]
         ).properties(
-            title="Daily Generation: Renewables vs. Fossil Fuels (Apr–Jun 2025)",
+            title="Daily Generation: Renewables vs. Fossil Fuels (Full Year 2025)",
             width=900, height=320
         ).interactive()
 
@@ -485,7 +482,7 @@ def _(mo):
 @app.cell
 def _(alt, pd, smard_aggregate_daily, smard_load):
     def _chart_supply():
-        _d = smard_aggregate_daily(smard_load("cleaned_smard_q2_2025.csv"))
+        _d = smard_aggregate_daily(smard_load("cleaned_smard_2025.csv"))
         _labels = {
             "Total_Generation": "⚡ Generation",
             "Grid_Load":        "🏠 Demand",
@@ -522,7 +519,7 @@ def _(alt, pd, smard_aggregate_daily, smard_load):
                 alt.Tooltip("GWh:Q", format=".0f"),
             ]
         ).properties(
-            title="Supply vs. Demand — Germany Apr–Jun 2025",
+            title="Supply vs. Demand — Germany Full Year 2025",
             width=900, height=320
         ).interactive()
 
@@ -536,7 +533,8 @@ def _(mo):
     ---
     ## 📊 Chart 3 · Solar ☀️ vs. Wind 🌬️ — the two workhorses
 
-    > Solar grows predictably: longer days → more energy (visible April → June).
+    > Solar grows predictably: longer days → more energy (visible Jan → Jun → Dec).
+    > You can clearly see the seasonal arc of solar across the year.
     > Wind follows no seasonal pattern — it comes in unpredictable bursts and lulls.
     >
     > This **complementary behaviour** is actually helpful for grid stability.
@@ -548,7 +546,7 @@ def _(mo):
 @app.cell
 def _(alt, pd, smard_aggregate_daily, smard_load):
     def _chart_solar_wind():
-        _d = smard_aggregate_daily(smard_load("cleaned_smard_q2_2025.csv"))
+        _d = smard_aggregate_daily(smard_load("cleaned_smard_2025.csv"))
         _m = pd.melt(
             _d[["Date","Solar","Total_Wind"]].assign(
                 Solar=_d["Solar"]/1000,
@@ -569,7 +567,7 @@ def _(alt, pd, smard_aggregate_daily, smard_load):
                 alt.Tooltip("GWh:Q", format=".0f"),
             ]
         ).properties(
-            title="Solar vs. Wind — Daily Generation overlaid (Apr–Jun 2025)",
+            title="Solar vs. Wind — Daily Generation overlaid (Full Year 2025)",
             width=900, height=300
         ).interactive()
 
@@ -583,7 +581,7 @@ def _(mo):
     ---
     ## 📊 Chart 4 · The daily rhythm — when do we generate and consume?
 
-    > Average power by hour of day, across all 91 days in the dataset.
+    > Average power by hour of day, averaged across all 365 days in the dataset.
     >
     > **The "duck curve" problem:** Solar peaks sharply around **noon**,
     > but demand peaks in the **morning and evening** when people wake up and come home.
@@ -597,7 +595,7 @@ def _(mo):
 @app.cell
 def _(alt, pd, smard_load):
     def _chart_hourly():
-        _df = smard_load("cleaned_smard_q2_2025.csv")
+        _df = smard_load("cleaned_smard_2025.csv")
         _df["Hour"] = _df["Date"].dt.hour
         _h = _df.groupby("Hour")[["Solar","Total_Wind","Grid_Load"]].mean().reset_index()
         _h = _h.assign(Solar=_h["Solar"]/1000, Total_Wind=_h["Total_Wind"]/1000, Grid_Load=_h["Grid_Load"]/1000)
@@ -612,7 +610,7 @@ def _(alt, pd, smard_load):
             ),
             tooltip=[alt.Tooltip("Hour:O"), alt.Tooltip("Label:N"), alt.Tooltip("GW:Q", format=".2f")]
         ).properties(
-            title="Average Hourly Power — Solar, Wind, and Demand (Apr–Jun 2025)",
+            title="Average Hourly Power — Solar, Wind, and Demand (Full Year 2025)",
             width=700, height=320
         )
 
@@ -640,7 +638,7 @@ def _(mo):
 @app.cell
 def _(alt, smard_aggregate_daily, smard_load):
     def _chart_risk():
-        _d = smard_aggregate_daily(smard_load("cleaned_smard_q2_2025.csv"))
+        _d = smard_aggregate_daily(smard_load("cleaned_smard_2025.csv"))
         _d = _d.copy()
         _d["Risk"] = "🟢 Normal (≥60%)"
         _d.loc[_d["Renewable_Share_Pct"] < 60, "Risk"] = "🟡 Watch zone (50–60%)"
@@ -664,7 +662,7 @@ def _(alt, smard_aggregate_daily, smard_load):
                 alt.Tooltip("Risk:N"),
             ]
         ).properties(
-            title="Daily Renewable Share — Risk Assessment (Apr–Jun 2025)",
+            title="Daily Renewable Share — Risk Assessment (Full Year 2025)",
             width=900, height=320
         ).interactive()
 
@@ -704,34 +702,124 @@ def _(mo):
 
 
 @app.cell
-def _(dwd_load, merge_energy_weather, mo, smard_load):
-    def _corr_table():
-        _s = smard_load("cleaned_smard_q2_2025.csv")
+def _(mo, smard_load, dwd_load, merge_energy_weather):
+    def _build_analysis():
+        _s = smard_load("cleaned_smard_2025.csv")
         _w = dwd_load()
-        _merged = merge_energy_weather(_s, _w)
-        _cols = ["Solar","Total_Wind","Residual_Load","wind_speed","sunshine_min","global_radiation"]
-        _avail = [c for c in _cols if c in _merged.columns]
-        _corr = _merged[_avail].corr().round(2)
-        _header = "| | " + " | ".join(f"`{c}`" for c in _avail) + " |"
-        _sep    = "|---|" + "|".join(["---"] * len(_avail)) + "|"
-        _rows   = "\n".join(
-            "| **`" + r + "`** | " + " | ".join(str(_corr.loc[r, c]) for c in _avail) + " |"
+        _m = merge_energy_weather(_s, _w)
+
+        # ── sample rows ───────────────────────────────────────────────
+        _preview_cols = ["Date", "Solar", "Total_Wind", "Total_Renewable",
+                         "Total_Fossil", "Grid_Load", "Residual_Load",
+                         "wind_speed", "sunshine_min", "global_radiation"]
+        _show = [c for c in _preview_cols if c in _m.columns]
+        _sub  = _m[_show].head(4).copy()
+        _sub["Date"] = _sub["Date"].astype(str).str[:16]
+        for c in _show[1:]:
+            _sub[c] = _sub[c].apply(
+                lambda x: f"{float(x):,.1f}" if str(x) != "nan" else "—"
+            )
+        _hdr  = "| " + " | ".join(_show) + " |"
+        _sep  = "|" + "|".join(["---"] * len(_show)) + "|"
+        _rows_md = "\n".join(
+            "| " + " | ".join(str(v) for v in row) + " |"
+            for row in _sub.itertuples(index=False)
+        )
+
+        # ── missing values ────────────────────────────────────────────
+        _miss_lines = []
+        for c in ["wind_speed", "sunshine_min", "global_radiation"]:
+            if c in _m.columns:
+                _n_miss = int(_m[c].isna().sum())
+                _pct    = _n_miss / len(_m) * 100
+                _status = "✅ good" if _pct < 5 else "⚠️ watch" if _pct < 10 else "❌ high"
+                _miss_lines.append(
+                    f"| `{c}` | {len(_m) - _n_miss:,} | {_n_miss:,} "
+                    f"| {_pct:.1f}% | {_status} |"
+                )
+        _miss_md = "\n".join(_miss_lines)
+
+        # ── correlation matrix ────────────────────────────────────────
+        _corr_cols = ["Solar", "Total_Wind", "Residual_Load",
+                      "wind_speed", "sunshine_min", "global_radiation"]
+        _avail = [c for c in _corr_cols if c in _m.columns]
+        _corr  = _m[_avail].corr().round(2)
+
+        # colour-code each cell: strong=bold, moderate=normal, weak=muted
+        def _fmt_cell(val, row_col, col_col):
+            if row_col == col_col:
+                return "**1.00**"          # diagonal
+            v = _corr.loc[row_col, col_col]
+            if abs(v) >= 0.7:
+                return f"**{v}** 🔴" if v < 0 else f"**{v}** 🟢"
+            elif abs(v) >= 0.4:
+                return f"{v} 🟡"
+            else:
+                return f"*{v}*"            # italics = weak
+
+        _c_hdr = "| | " + " | ".join(f"`{c}`" for c in _avail) + " |"
+        _c_sep = "|---|" + "|".join(["---"] * len(_avail)) + "|"
+        _c_rows = "\n".join(
+            "| **`" + r + "`** | " +
+            " | ".join(_fmt_cell(None, r, c) for c in _avail) + " |"
             for r in _avail
         )
-        return f"{_header}\n{_sep}\n{_rows}"
+
+        return _m, _hdr, _sep, _rows_md, _miss_md, _c_hdr, _c_sep, _c_rows
+
+    (_merged, _hdr, _sep, _rows_md,
+     _miss_md, _c_hdr, _c_sep, _c_rows) = _build_analysis()
 
     mo.md(f"""
-    ### Correlation matrix (hourly data, Apr–Jun 2025)
+    ---
+    ## 🔍 Merged dataset — energy meets weather
 
-    {_corr_table()}
+    > Every row = one hour. SMARD columns (energy) joined with DWD columns (weather) on Date.
+    > **{len(_merged):,} rows · {len(_merged.columns)} columns**
+    > · {_merged['Date'].min()} → {_merged['Date'].max()}
 
-    > Read across the `Solar` row to see what predicts solar generation.
-    > Read across the `Total_Wind` row to see what predicts wind generation.
-    > Strong correlations (close to 1.0 or −1.0) confirm that weather data
-    > is genuinely useful for understanding and forecasting the grid.
+    ### Sample rows (first 4 hours)
+
+    {_hdr}
+    {_sep}
+    {_rows_md}
+
+    > `—` means no weather reading that hour (sensor missing or night-time).
+    > These rows are automatically skipped in the correlation calculation.
+
+    ---
+
+    ### Missing values in weather columns
+
+    | Column | Available rows | Missing | Missing % | Status |
+    |--------|---------------|---------|-----------|--------|
+    {_miss_md}
+
+    > ✅ below 5% = safe to use · ⚠️ 5–10% = use with caution · ❌ above 10% = consider excluding
+
+    ---
+
+    ### Correlation matrix (hourly data, Full Year 2025)
+
+    > How strongly does each variable move with every other?
+    > **r = 1.0** = perfect positive link · **r = 0.0** = no link · **r = −1.0** = perfect inverse link
+
+    {_c_hdr}
+    {_c_sep}
+    {_c_rows}
+
+    **How to read this:**
+    - 🟢 **bold green** = strong positive (≥ 0.7) — one goes up, other goes up
+    - 🔴 **bold red** = strong negative (≤ −0.7) — one goes up, other goes down
+    - 🟡 moderate (0.4–0.7) · *italic* = weak (< 0.4)
+
+    **Key findings to highlight to audience:**
+    - `global_radiation` vs `Solar` → should be the strongest link in the table
+    - `wind_speed` vs `Total_Wind` → strong but not as high — wind power is non-linear
+    - `wind_speed` vs `Solar` → near zero — wind doesn't affect solar panels at all
+    - `Residual_Load` vs renewables → negative — more sun/wind = less fossil needed ✅
     """)
     return
-
 
 @app.cell
 def _(mo):
@@ -739,7 +827,7 @@ def _(mo):
     ---
     ## 🗺️ What comes next — project roadmap
 
-    > This notebook covers **April–June 2025** (one quarter, 2,184 hourly rows).
+    > This notebook covers the **full year 2025** (8,760 hourly rows).
     > The full STAGES project extends this to **multiple years** and deeper analysis.
 
     ### Open research questions
