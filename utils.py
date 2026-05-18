@@ -98,209 +98,385 @@ def dwd_download_summary(status: dict) -> str:
     lines = ["| Station | Wind | Sun | Solar |", "|---------|------|-----|-------|"]
     for sid, results in status.items():
         name = DWD_STATIONS.get(sid, sid)
-        def icon(v): return "✅" if v else "❌"
-        lines.append(
-            f"| {name} (`{sid}`) | {icon(results.get('wind'))} | "
-            f"{icon(results.get('sun'))} | {icon(results.get('solar'))} |"
-        )
+        w = "✅" if results.get("wind")  else "❌"
+        s = "✅" if results.get("sun")   else "❌"
+        r = "✅" if results.get("solar") else "❌"
+        lines.append(f"| {name} (`{sid}`) | {w} | {s} | {r} |")
     return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3.  DWD CLEAN
+# 3.  DWD CLEAN & BUILD
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _dwd_parse_timestamp(df: pd.DataFrame) -> pd.Series:
-    """Parse MESS_DATUM column (YYYYMMDDHH) → tz-aware Europe/Berlin time."""
-    return (
-        pd.to_datetime(df["MESS_DATUM"].astype(str), format="%Y%m%d%H", utc=True)
-        .dt.tz_convert("Europe/Berlin")
+def _dwd_parse_wind(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, sep=";", encoding="latin-1")
+    df.columns = df.columns.str.strip()
+    df = df[["MESS_DATUM", "F"]].copy()
+    df.columns = ["ts", "wind_speed"]
+    df["ts"] = pd.to_datetime(df["ts"].astype(str), format="%Y%m%d%H", errors="coerce")
+    df["wind_speed"] = pd.to_numeric(df["wind_speed"], errors="coerce").replace(-999, float("nan"))
+    return df.dropna(subset=["ts"]).set_index("ts")
+
+
+def _dwd_parse_sun(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, sep=";", encoding="latin-1")
+    df.columns = df.columns.str.strip()
+    df = df[["MESS_DATUM", "SD_SO"]].copy()
+    df.columns = ["ts", "sunshine_min"]
+    df["ts"] = pd.to_datetime(df["ts"].astype(str), format="%Y%m%d%H", errors="coerce")
+    df["sunshine_min"] = pd.to_numeric(df["sunshine_min"], errors="coerce").replace(-999, float("nan"))
+    return df.dropna(subset=["ts"]).set_index("ts")
+
+
+def _dwd_parse_solar(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, sep=";", encoding="latin-1")
+    df.columns = df.columns.str.strip()
+    df = df[["MESS_DATUM_WOZ", "FG_LBERG"]].copy()
+    df.columns = ["ts", "global_radiation"]
+    df["ts"] = pd.to_datetime(
+        df["ts"].astype(str).str.strip(),
+        format="%Y%m%d%H:%M",
+        errors="coerce",
     )
+    df["global_radiation"] = pd.to_numeric(df["global_radiation"], errors="coerce").replace(-999, float("nan"))
+    return df.dropna(subset=["ts"]).set_index("ts")
 
 
-def dwd_load_wind(station_id: str) -> "pd.DataFrame | None":
-    """
-    Load hourly wind speed (m/s) for one station.
-    DWD column F = mean wind speed. Values < 0 (coded -999) replaced with NaN.
-    """
-    files = glob.glob(f"data/dwd/{station_id}_wind/produkt_*.txt")
-    if not files:
-        return None
-    df = pd.read_csv(files[0], sep=";", encoding="latin-1")
-    df.columns = df.columns.str.strip()
-    df["Date"] = _dwd_parse_timestamp(df)
-    col = next((c for c in df.columns if c.strip() == "F"), None)
-    if col is None:
-        return None
-    df["wind_speed"] = pd.to_numeric(df[col], errors="coerce")
-    df.loc[df["wind_speed"] < 0, "wind_speed"] = None
-    df["station_id"] = station_id
-    return df[["Date", "station_id", "wind_speed"]].copy()
+def _dwd_load_station(station_id: str) -> pd.DataFrame:
+    """Load and join wind + sun + solar for one station. Returns hourly indexed df."""
+    def _find(suffix):
+        matches = glob.glob(f"data/dwd/{station_id}_{suffix}/produkt_*.txt")
+        return matches[0] if matches else None
 
+    frames = []
+    if p := _find("wind"):
+        frames.append(_dwd_parse_wind(p))
+    if p := _find("sun"):
+        frames.append(_dwd_parse_sun(p))
+    if p := _find("solar"):
+        frames.append(_dwd_parse_solar(p))
 
-def dwd_load_sun(station_id: str) -> "pd.DataFrame | None":
-    """
-    Load hourly sunshine duration (minutes/hour) for one station.
-    DWD column SD_SO: 0–60 min. Values < 0 replaced with NaN.
-    """
-    files = glob.glob(f"data/dwd/{station_id}_sun/produkt_*.txt")
-    if not files:
-        return None
-    df = pd.read_csv(files[0], sep=";", encoding="latin-1")
-    df.columns = df.columns.str.strip()
-    df["Date"] = _dwd_parse_timestamp(df)
-    col = next((c for c in df.columns if c.strip() == "SD_SO"), None)
-    if col is None:
-        return None
-    df["sunshine_min"] = pd.to_numeric(df[col], errors="coerce")
-    df.loc[df["sunshine_min"] < 0, "sunshine_min"] = None
-    df["station_id"] = station_id
-    return df[["Date", "station_id", "sunshine_min"]].copy()
+    if not frames:
+        return pd.DataFrame()
 
-
-def _dwd_parse_solar_timestamp(df: pd.DataFrame) -> pd.Series:
-    """
-    Parse solar file timestamps → naive datetime (no timezone).
-
-    Solar files use MESS_DATUM_WOZ with format 'YYYYMMDDhh:mm'
-    (e.g. '2005010101:00') — local solar time, NOT the standard YYYYMMDDHH
-    used by wind/sun files.
-
-    Two problems with solar timestamps:
-    1. Format is '%Y%m%d%H:%M' not '%Y%m%d%H' → ValueError if wrong format used
-    2. The file spans 20 years so DST ambiguity (clocks going back) raises errors
-       if you try to tz_localize. We return naive timestamps instead —
-       the merge with SMARD (also stripped to naive) still aligns correctly.
-    """
-    ts_col = "MESS_DATUM_WOZ" if "MESS_DATUM_WOZ" in df.columns else "MESS_DATUM"
-    return pd.to_datetime(
-        df[ts_col].astype(str).str.strip(),
-        format="%Y%m%d%H:%M"
-    )
-
-
-def dwd_load_solar(station_id: str) -> "pd.DataFrame | None":
-    """
-    Load hourly global radiation (J/cm²) from the solar/ folder.
-    DWD column FG_LBERG = global incoming radiation. Values < 0 → NaN.
-    Note: solar/ has no recent/ subfolder — one file covers full history.
-    Note: uses _dwd_parse_solar_timestamp(), NOT _dwd_parse_timestamp(),
-          because solar files use format '%Y%m%d%H:%M' not '%Y%m%d%H'.
-    """
-    files = glob.glob(f"data/dwd/{station_id}_solar/produkt_*.txt")
-    if not files:
-        return None
-    df = pd.read_csv(files[0], sep=";", encoding="latin-1")
-    df.columns = df.columns.str.strip()
-    df["Date"] = _dwd_parse_solar_timestamp(df)
-    col = next((c for c in df.columns if c.strip() == "FG_LBERG"), None)
-    if col is None:
-        return None
-    df["global_radiation"] = pd.to_numeric(df[col], errors="coerce")
-    df.loc[df["global_radiation"] < 0, "global_radiation"] = None
-    df["station_id"] = station_id
-    return df[["Date", "station_id", "global_radiation"]].copy()
+    out = frames[0]
+    for f in frames[1:]:
+        out = out.join(f, how="outer")
+    return out
 
 
 def dwd_build_national(stations: dict = None) -> pd.DataFrame:
     """
-    Load wind + sun + solar for all stations, average per hour across stations.
-
-    Returns hourly DataFrame:
-        Date | wind_speed (m/s) | sunshine_min (min/hr) | global_radiation (J/cm²)
+    Build a national hourly weather DataFrame by averaging across all stations.
+    Returns a DataFrame with columns: Date, wind_speed, sunshine_min, global_radiation.
     """
     if stations is None:
         stations = DWD_STATIONS
 
-    wind_frames, sun_frames, solar_frames = [], [], []
+    all_frames = []
     for sid in stations:
-        w = dwd_load_wind(sid)
-        s = dwd_load_sun(sid)
-        r = dwd_load_solar(sid)
-        if w is not None: wind_frames.append(w)
-        if s is not None: sun_frames.append(s)
-        if r is not None: solar_frames.append(r)
+        df = _dwd_load_station(sid)
+        if not df.empty:
+            all_frames.append(df)
 
-    def _avg(frames, col):
-        if not frames:
-            return pd.DataFrame(columns=["Date", col])
-        combined = pd.concat(frames)
-        # Strip timezone so solar (naive) and wind/sun (tz-aware) merge without error
-        if combined["Date"].dt.tz is not None:
-            combined["Date"] = combined["Date"].dt.tz_localize(None)
-        return combined.groupby("Date")[col].mean().reset_index()
+    if not all_frames:
+        raise RuntimeError("No DWD station data found — run dwd_download_all() first.")
 
-    weather = _avg(wind_frames, "wind_speed")
-    weather = weather.merge(_avg(sun_frames,   "sunshine_min"),    on="Date", how="outer")
-    weather = weather.merge(_avg(solar_frames, "global_radiation"), on="Date", how="outer")
-    return weather.sort_values("Date").reset_index(drop=True)
+    combined = pd.concat(all_frames)
+    national = combined.groupby(combined.index).mean(numeric_only=True)
+    national.index = pd.to_datetime(national.index, utc=True).tz_convert("Europe/Berlin")
+    national.index.name = "Date"          # name the index so reset_index produces "Date"
+    national = national.reset_index()
+    return national.sort_values("Date").reset_index(drop=True)
 
 
 def dwd_save(df: pd.DataFrame, path: str = "data/dwd/weather_national.csv") -> str:
-    """
-    Save the national weather DataFrame to CSV.
-
-    Only keeps rows where at least one weather value is non-null.
-    This prevents the solar file's 20-year history from inflating the row count
-    and making wind/sun appear 100% missing (they only cover the last 500 days).
-    Also strips timezone info to avoid mixed-tz issues.
-    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    out = df.copy()
-    if hasattr(out["Date"], "dt") and out["Date"].dt.tz is not None:
-        out["Date"] = out["Date"].dt.tz_localize(None)
-    weather_cols = [c for c in ["wind_speed", "sunshine_min", "global_radiation"] if c in out.columns]
-    out = out.dropna(subset=weather_cols, how="all")
-    out = out.sort_values("Date").reset_index(drop=True)
-    out.to_csv(path, index=False)
+    df.to_csv(path, index=False)
     return path
 
 
 def dwd_load(path: str = "data/dwd/weather_national.csv") -> pd.DataFrame:
-    """Load the saved national weather CSV as timezone-naive datetime."""
     df = pd.read_csv(path)
-    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_convert("Europe/Berlin")
     return df
 
 
 def dwd_quality_report(df: pd.DataFrame) -> str:
-    """
-    Return a markdown quality-report table.
-
-    Wind + sun cover only the last ~500 days (recent/ folder).
-    Solar covers 2005 to present. Showing available rows per column
-    makes this difference clear instead of showing misleading 100% missing.
-    """
+    """Return a markdown table with missing-value stats for each weather column."""
+    cols = ["wind_speed", "sunshine_min", "global_radiation"]
     lines = [
-        "| Column | Available rows | Missing rows | Missing % | Mean |",
-        "|--------|---------------|-------------|-----------|------|",
+        "| Column | Available | Missing | Missing % | Status |",
+        "|--------|-----------|---------|-----------|--------|",
     ]
-    for col in ["wind_speed", "sunshine_min", "global_radiation"]:
-        if col not in df.columns:
+    for c in cols:
+        if c not in df.columns:
             continue
-        total    = len(df)
-        valid    = int(df[col].notna().sum())
-        missing  = total - valid
-        pct      = missing / total * 100
-        mean     = df[col].mean()
-        mean_str = f"{mean:.2f}" if not pd.isna(mean) else "—"
-        lines.append(f"| `{col}` | {valid:,} | {missing:,} | {pct:.1f}% | {mean_str} |")
-    lines.append(f"\n> Date range: **{df['Date'].min()}** → **{df['Date'].max()}** · Rows: **{len(df):,}**")
-    lines.append("> Wind + sun cover the last ~500 days only. Solar covers 2005–present. This is expected.")
+        n_miss = int(df[c].isna().sum())
+        pct    = n_miss / len(df) * 100
+        status = "✅ good" if pct < 5 else ("⚠️ watch" if pct < 10 else "❌ high")
+        lines.append(f"| `{c}` | {len(df) - n_miss:,} | {n_miss:,} | {pct:.1f}% | {status} |")
     return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4.  SMARD  —  LOAD & CLEAN
+# 4.  SMARD  —  API FETCH (generation + consumption combined)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def smard_load_raw(file_name: str, folder: str = "data") -> pd.DataFrame:
-    """Load a raw SMARD CSV export (semicolon-separated, UTF-8 BOM)."""
-    return pd.read_csv(
-        os.path.join(folder, file_name),
-        sep=";", encoding="utf-8-sig", low_memory=False,
-    )
+def smard_fetch_api(start_date: str, end_date: str) -> "pd.DataFrame":
+    """
+    Fetch SMARD generation + consumption data directly from the SMARD API
+    and return a single merged DataFrame identical to what the CSV pipeline
+    produces — so all downstream functions (smard_add_features, smard_merge,
+    smard_save, etc.) work without any changes.
 
+    Args:
+        start_date: "YYYY-MM-DD"  e.g. "2025-01-01"
+        end_date:   "YYYY-MM-DD"  e.g. "2026-01-01"  (exclusive upper bound)
+
+    Filter IDs (verified May 2026):
+        1223  Photovoltaics (Solar)
+        1224  Wind offshore
+        1225  Wind onshore
+        1226  Biomass
+        1227  Hydropower
+        1228  Other renewable
+        1229  Nuclear
+        1230  Lignite
+        1231  Hard coal
+        1232  Fossil gas
+        4066  Hydro pumped storage
+        1233  Other conventional
+        5078  Grid load (consumption)
+        5079  Grid load incl. pumped storage
+        5097  Residual load
+    """
+    import requests as _req
+
+    BASE = "https://www.smard.de/app/chart_data"
+    REGION = "DE"
+    RESOLUTION = "hour"
+
+    # (filter_id, output_column_name, category)
+    # IDs verified from working smard_filters dict (May 2026).
+    # Nuclear excluded — Germany shut down last reactors April 2023,
+    # API returns empty body for any period after that.
+    SOURCES = [
+        (4068, "Solar",              "gen"),
+        (1225, "Wind_Offshore",      "gen"),
+        (4067, "Wind_Onshore",       "gen"),
+        (4066, "Biomass",            "gen"),
+        (1226, "Hydro",              "gen"),
+        (1228, "Other_Renewable",    "gen"),
+        (1223, "Lignite",            "gen"),
+        (4069, "Hard_Coal",          "gen"),
+        (4071, "Gas",                "gen"),
+        (4070, "Pumped_Storage",     "gen"),
+        (1227, "Other_Conventional", "gen"),
+        (5078, "Grid_Load",          "con"),
+        (5097, "Residual_Load",      "con"),
+    ]
+
+    start_dt = pd.to_datetime(start_date)
+    end_dt   = pd.to_datetime(end_date)
+
+    def _fetch_series(filter_id: int, col_name: str) -> "pd.DataFrame | None":
+        """
+        Fetch one series. Returns None when:
+          - API returns empty body (e.g. Nuclear after 2023 shutdown)
+          - Response is not valid JSON (server error, rate limit)
+          - No timestamps fall in the requested date range
+        Caller fills the missing column with zeros so nothing downstream breaks.
+        """
+        index_url = f"{BASE}/{filter_id}/{REGION}/index_{RESOLUTION}.json"
+        try:
+            resp = _req.get(index_url, timeout=30)
+            if not resp.content:
+                return None                        # empty body → source not available
+            index_data = resp.json()
+        except Exception:
+            return None                            # JSON decode / network error
+
+        selected = [
+            ts for ts in index_data.get("timestamps", [])
+            if (pd.to_datetime(ts, unit="ms") >= start_dt - pd.Timedelta(days=10))
+            and (pd.to_datetime(ts, unit="ms") <= end_dt)
+        ]
+        if not selected:
+            return None                            # no data in this date window
+
+        rows = []
+        for ts in selected:
+            url = f"{BASE}/{filter_id}/{REGION}/{filter_id}_{REGION}_{RESOLUTION}_{ts}.json"
+            try:
+                chunk = _req.get(url, timeout=30)
+                if not chunk.content:
+                    continue
+                rows.extend(chunk.json().get("series", []))
+            except Exception:
+                continue                           # skip bad chunk, keep going
+
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows, columns=["timestamp", col_name])
+        df["Date"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df[col_name] = pd.to_numeric(df[col_name], errors="coerce").fillna(0)
+        df = df[(df["Date"] >= start_dt) & (df["Date"] < end_dt)]
+        return df[["Date", col_name]].reset_index(drop=True)
+
+    # Fetch all series and merge on Date
+    print("Fetching SMARD data from API...")
+    merged = None
+    skipped = []
+    for fid, col, cat in SOURCES:
+        print(f"  {col}...", end=" ", flush=True)
+        series = _fetch_series(fid, col)
+        if series is None:
+            skipped.append(col)
+            print("skipped (no data for this period)")
+            continue
+        merged = series if merged is None else merged.merge(series, on="Date", how="outer")
+        print("ok")
+
+    merged = merged.sort_values("Date").reset_index(drop=True)
+
+    # Fill NaN gaps and add zero columns for any skipped sources
+    for _, col, _ in SOURCES:
+        if col not in merged.columns:
+            merged[col] = 0          # skipped source → fill with 0
+        else:
+            merged[col] = merged[col].fillna(0)
+
+    if skipped:
+        print(f"  Note: {', '.join(skipped)} had no data — filled with 0.")
+    print(f"Done — {len(merged):,} rows, {merged['Date'].min()} → {merged['Date'].max()}")
+    return merged
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4b. SMARD  —  SINGLE SERIES FETCH (for consumption breakdown, etc.)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_smard_series(
+    filter_id: int,
+    name: str,
+    start_date: str,
+    end_date: str,
+    region: str = "DE",
+    resolution: str = "hour",
+) -> pd.DataFrame:
+    """
+    Fetch a single SMARD time series by filter_id.
+
+    Returns a two-column DataFrame:
+        "Start date"  — timestamp (datetime, timezone-naive)
+        <name>        — values in MWh
+
+    Uses the same SMARD chart_data API as smard_fetch_api.
+
+    Consumption filter IDs (verified May 2026):
+        410   Consumption (grid load)
+        4359  Grid Load incl. Hydro Pumped Storage
+        4387  Hydro Pumped Storage Consumption
+        4355  Residual Load
+    """
+    import requests as _req
+
+    BASE     = "https://www.smard.de/app/chart_data"
+    start_dt = pd.to_datetime(start_date)
+    end_dt   = pd.to_datetime(end_date)
+
+    index_url = f"{BASE}/{filter_id}/{region}/index_{resolution}.json"
+    try:
+        resp = _req.get(index_url, timeout=30)
+        resp.raise_for_status()
+        index_data = resp.json()
+    except Exception as e:
+        raise RuntimeError(f"load_smard_series: index fetch failed for filter {filter_id}: {e}")
+
+    selected = [
+        ts for ts in index_data.get("timestamps", [])
+        if (pd.to_datetime(ts, unit="ms") >= start_dt - pd.Timedelta(days=10))
+        and (pd.to_datetime(ts, unit="ms") <= end_dt)
+    ]
+
+    rows = []
+    for ts in selected:
+        url = f"{BASE}/{filter_id}/{region}/{filter_id}_{region}_{resolution}_{ts}.json"
+        try:
+            chunk = _req.get(url, timeout=30)
+            if chunk.content:
+                rows.extend(chunk.json().get("series", []))
+        except Exception:
+            continue
+
+    if not rows:
+        return pd.DataFrame(columns=["Start date", name])
+
+    df = pd.DataFrame(rows, columns=["Start date", name])
+    df["Start date"] = pd.to_datetime(df["Start date"], unit="ms")
+    df[name] = pd.to_numeric(df[name], errors="coerce").fillna(0)
+    df = df[(df["Start date"] >= start_dt) & (df["Start date"] < end_dt)]
+    return df.reset_index(drop=True)
+
+
+def smard_fetch_consumption(
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """
+    Fetch all four SMARD consumption series and return a single merged DataFrame.
+
+    Columns: Start date, Consumption, Grid Load incl. Hydro Pumped Storage,
+             Hydro Pumped Storage Consumption, Residual Load
+
+    Args:
+        start_date: "YYYY-MM-DD"
+        end_date:   "YYYY-MM-DD" (exclusive)
+    """
+    consumption_filters = {
+        "Consumption":                          410,
+        "Grid Load incl. Hydro Pumped Storage": 4359,
+        "Hydro Pumped Storage Consumption":     4387,
+        "Residual Load":                        4355,
+    }
+
+    dfs = []
+    for series_name, filter_id in consumption_filters.items():
+        print(f"  Loading {series_name}...")
+        dfs.append(
+            load_smard_series(
+                filter_id=filter_id,
+                name=series_name,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+
+    merged = dfs[0]
+    for df in dfs[1:]:
+        merged = merged.merge(df, on="Start date", how="outer")
+
+    merged = merged.sort_values("Start date").fillna(0).reset_index(drop=True)
+    print(f"  Done — {len(merged):,} rows")
+    return merged
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4c. SMARD  —  GENERATION COLUMN GROUPS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: All generation source columns present in the smard_fetch_api output
+RENEWABLE_COLS    = ["Solar", "Wind_Offshore", "Wind_Onshore", "Biomass", "Hydro", "Other_Renewable"]
+CONVENTIONAL_COLS = ["Lignite", "Hard_Coal", "Gas", "Pumped_Storage", "Other_Conventional"]
+ENERGY_COLS       = RENEWABLE_COLS + CONVENTIONAL_COLS
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4d. SMARD  —  CSV PIPELINE (legacy / offline fallback)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _parse_mwh(series: pd.Series) -> pd.Series:
     """Convert SMARD MWh strings ('1,234.5' or '-') to float."""
@@ -363,6 +539,99 @@ def smard_clean_consumption(df: pd.DataFrame) -> pd.DataFrame:
     return out[["Date"] + [c for c in col_map.values() if c in out.columns]]
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4e. SMARD  —  MARKET TRADE / IMPORT-EXPORT DATA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_smard_market_trade(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Load German electricity import/export market data from SMARD.
+
+    Returns hourly import/export totals and net trade balance.
+
+    Columns added:
+      Total_Export_MWh  — sum of all export columns
+      Total_Import_MWh  — sum of all import columns, converted to positive values
+      Net_Trade_MWh     — exports minus imports
+                          positive = net exporter, negative = net importer
+    """
+    import requests as _req
+
+    url = "https://www.smard.de/nip-download-manager/nip/download/market-data"
+
+    start_ts = int(pd.to_datetime(start_date, utc=True).timestamp() * 1000)
+    end_ts   = int(pd.to_datetime(end_date, utc=True).timestamp() * 1000)
+
+    payload = {
+        "request_form": [
+            {
+                "format": "CSV",
+                "moduleIds": [
+                    22004629, 22004722, 22004724, 22004404,
+                    22004409, 22004545, 22004546, 22004548,
+                    22004550, 22004551, 22004552, 22004405,
+                    22004547, 22004403, 22004406, 22004407,
+                    22004408, 22004410, 22004412, 22004549,
+                    22004553, 22004998, 22004712,
+                ],
+                "region": "DE",
+                "timestamp_from": start_ts,
+                "timestamp_to": end_ts,
+                "type": "discrete",
+                "language": "en",
+                "resolution": "hour",
+            }
+        ]
+    }
+
+    response = _req.post(url, json=payload, timeout=60)
+    response.raise_for_status()
+
+    df_trade = pd.read_csv(io.StringIO(response.text), sep=";")
+
+    df_trade.columns = (
+        df_trade.columns
+        .str.replace(" Calculated resolutions", "", regex=False)
+        .str.strip()
+    )
+
+    df_trade["Start date"] = pd.to_datetime(df_trade["Start date"])
+    df_trade["End date"]   = pd.to_datetime(df_trade["End date"])
+
+    for col in df_trade.columns:
+        if col not in ["Start date", "End date"]:
+            df_trade[col] = (
+                df_trade[col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+            )
+            df_trade[col] = pd.to_numeric(df_trade[col], errors="coerce").fillna(0)
+
+    export_cols = [
+        col for col in df_trade.columns
+        if "(export)" in col.lower()
+    ]
+
+    import_cols = [
+        col for col in df_trade.columns
+        if "(import)" in col.lower()
+    ]
+
+    # SMARD often stores imports as negative values. Convert them to positive
+    # so import and export totals are easy to compare in charts.
+    df_trade[import_cols] = df_trade[import_cols].abs()
+
+    df_trade["Total_Export_MWh"] = df_trade[export_cols].sum(axis=1)
+    df_trade["Total_Import_MWh"] = df_trade[import_cols].sum(axis=1)
+    df_trade["Net_Trade_MWh"] = (
+        df_trade["Total_Export_MWh"] - df_trade["Total_Import_MWh"]
+    )
+
+    return df_trade
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5.  SMARD  —  FEATURE ENGINEERING & AGGREGATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -379,9 +648,9 @@ def smard_add_features(gen: pd.DataFrame) -> pd.DataFrame:
       Renewable_Share_Pct = Total_Renewable / Total_Generation × 100
     """
     df = gen.copy()
-    df["Total_Wind"]      = df["Wind_Onshore"] + df["Wind_Offshore"]
-    df["Total_Renewable"] = df[["Solar","Total_Wind","Biomass","Hydro","Other_Renewable"]].sum(axis=1)
-    df["Total_Fossil"]    = df[["Lignite","Hard_Coal","Gas","Other_Conventional"]].sum(axis=1)
+    df["Total_Wind"]        = df["Wind_Onshore"] + df["Wind_Offshore"]
+    df["Total_Renewable"]   = df[["Solar", "Total_Wind", "Biomass", "Hydro", "Other_Renewable"]].sum(axis=1)
+    df["Total_Fossil"]      = df[["Lignite", "Hard_Coal", "Gas", "Other_Conventional"]].sum(axis=1)
     df["Total_Generation"]  = df["Total_Renewable"] + df["Total_Fossil"] + df["Pumped_Storage"]
     df["Renewable_Share_Pct"] = (df["Total_Renewable"] / df["Total_Generation"] * 100).fillna(0)
     return df
@@ -408,6 +677,12 @@ def smard_aggregate_daily(df: pd.DataFrame) -> pd.DataFrame:
     Aggregate hourly merged DataFrame to daily totals.
     Share and coverage are recalculated from daily sums (not averages of hourly %).
     """
+    # 'day' may not exist if df came via merge_energy_weather instead of
+    # smard_merge — derive it on the fly in that case.
+    if "day" not in df.columns:
+        df = df.copy()
+        df["day"] = df["Date"].dt.date
+
     daily = df.groupby("day").sum(numeric_only=True).reset_index()
     daily["Date"]                = pd.to_datetime(daily["day"])
     daily["Renewable_Share_Pct"] = daily["Total_Renewable"] / daily["Total_Generation"] * 100
@@ -496,3 +771,95 @@ def summary_to_markdown(s: dict) -> str:
 | ⚠️ Low-renewable days (<50%) | **{s['low_renewable_days']} days** | When fossil backup was significant |
 | 🌑 Dunkelflaute days (<30%) | **{s['dunkelflaute_days']} days** | True "dark doldrums" periods |
 """
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8.  MONTHLY ANALYSIS HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Canonical month ordering for full-year 2025 displays
+MONTHS_2025 = [
+    "Jan 2025", "Feb 2025", "Mar 2025", "Apr 2025",
+    "May 2025", "Jun 2025", "Jul 2025", "Aug 2025",
+    "Sep 2025", "Oct 2025", "Nov 2025", "Dec 2025",
+]
+
+
+def build_monthly_balance(
+    df_generation: pd.DataFrame,
+    df_consumption: pd.DataFrame,
+    renewable_cols: list,
+    date_col: str = "Start date",
+) -> pd.DataFrame:
+    """
+    Build a monthly renewable-vs-demand balance table.
+
+    Args:
+        df_generation:  hourly generation DataFrame (contains renewable_cols)
+        df_consumption: hourly consumption DataFrame (contains 'Consumption')
+        renewable_cols: list of column names to sum as Total Renewable Generation
+        date_col:       name of the timestamp column (default "Start date")
+
+    Returns a DataFrame indexed by month (e.g. "Jan 2025") with columns:
+        Total_Renewable_Generation_MWh, Total_Demand_MWh,
+        Demand Met by Renewables [MWh], Remaining Demand [MWh],
+        Renewable Share [%],
+        Minimum Renewable Generation [MWh], Maximum Renewable Generation [MWh]
+    """
+    df = df_generation.copy()
+    df[date_col] = pd.to_datetime(df[date_col])
+    df["Month"]  = df[date_col].dt.strftime("%b %Y")
+    df["Total Renewable Generation"] = df[renewable_cols].sum(axis=1)
+
+    df = df.merge(
+        df_consumption[[date_col, "Consumption"]],
+        on=date_col,
+        how="inner",
+    )
+
+    summary = df.groupby("Month").agg(
+        Total_Renewable_Generation_MWh=("Total Renewable Generation", "sum"),
+        Total_Demand_MWh=("Consumption", "sum"),
+    )
+
+    summary["Demand Met by Renewables [MWh]"] = summary[
+        ["Total_Renewable_Generation_MWh", "Total_Demand_MWh"]
+    ].min(axis=1)
+
+    summary["Remaining Demand [MWh]"] = (
+        summary["Total_Demand_MWh"] - summary["Demand Met by Renewables [MWh]"]
+    )
+
+    summary["Renewable Share [%]"] = (
+        summary["Demand Met by Renewables [MWh]"] / summary["Total_Demand_MWh"] * 100
+    )
+
+    min_max = df.groupby("Month")["Total Renewable Generation"].agg(["min", "max"])
+    summary["Minimum Renewable Generation [MWh]"] = min_max["min"]
+    summary["Maximum Renewable Generation [MWh]"] = min_max["max"]
+
+    # Reindex to canonical month order, keeping only months present in data
+    present = [m for m in MONTHS_2025 if m in summary.index]
+    summary = summary.reindex(present)
+
+    return summary.round(3)
+
+
+def build_monthly_generation(
+    df_generation: pd.DataFrame,
+    energy_cols: list,
+    date_col: str = "Start date",
+) -> pd.DataFrame:
+    """
+    Aggregate hourly generation to monthly totals per source.
+
+    Returns a DataFrame indexed by month with one column per energy source.
+    """
+    df = df_generation.copy()
+    df[date_col] = pd.to_datetime(df[date_col])
+    df["Month"]  = df[date_col].dt.strftime("%b %Y")
+
+    monthly = df.groupby("Month")[energy_cols].sum()
+
+    present = [m for m in MONTHS_2025 if m in monthly.index]
+    return monthly.reindex(present)
