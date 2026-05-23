@@ -1,0 +1,11 @@
+[project]
+name = "stages"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "marimo>=0.23.2",
+    "pandas>=3.0.2",
+    "requests>=2.33.1",
+    "altair>=5.0.0",
+    "vegafusion>=2.0.0",
+]
