@@ -689,7 +689,7 @@ def _(
     total_import_twh,
 ):
     mo.md(f"""
-    # Final summary for presentation
+    # Summary
 
     ## Main findings
 
