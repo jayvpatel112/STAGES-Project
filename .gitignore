@@ -20,3 +20,6 @@ Thumbs.db
 data/dwd/*_wind/
 data/dwd/*_sun/
 data/dwd/*_solar/
+
+# Generated trade data
+data/cleaned/smard_trade_2025_country_hourly.csv
