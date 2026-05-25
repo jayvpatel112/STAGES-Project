@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Marimo session files
+__marimo__/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Raw DWD downloaded files
+data/dwd/*_wind/
+data/dwd/*_sun/
+data/dwd/*_solar/
