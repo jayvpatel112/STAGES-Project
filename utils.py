@@ -863,3 +863,409 @@ def build_monthly_generation(
 
     present = [m for m in MONTHS_2025 if m in monthly.index]
     return monthly.reindex(present)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9.  SMARD  —  CROSS-BORDER TRADE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_smard_market_trade(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetch hourly cross-border electricity trade data from the SMARD market-data API.
+
+    Returns a DataFrame with per-country export/import columns plus:
+        Total_Export_MWh, Total_Import_MWh, Net_Trade_MWh
+
+    Positive Net_Trade_MWh → Germany is a net exporter that hour.
+    Negative Net_Trade_MWh → Germany is a net importer that hour.
+
+    Module IDs cover all bilateral flows with DE neighbours verified
+    against SMARD market-data catalogue May 2026.
+    """
+    import io as _io
+    import requests as _req
+
+    url      = "https://www.smard.de/nip-download-manager/nip/download/market-data"
+    start_ts = int(pd.to_datetime(start_date, utc=True).timestamp() * 1000)
+    end_ts   = int(pd.to_datetime(end_date,   utc=True).timestamp() * 1000)
+
+    payload = {
+        "request_form": [
+            {
+                "format": "CSV",
+                "moduleIds": [
+                    22004629, 22004722, 22004724, 22004404,
+                    22004409, 22004545, 22004546, 22004548,
+                    22004550, 22004551, 22004552, 22004405,
+                    22004547, 22004403, 22004406, 22004407,
+                    22004408, 22004410, 22004412, 22004549,
+                    22004553, 22004998, 22004712,
+                ],
+                "region": "DE",
+                "timestamp_from": start_ts,
+                "timestamp_to":   end_ts,
+                "type": "discrete",
+                "language": "en",
+                "resolution": "hour",
+            }
+        ]
+    }
+
+    resp = _req.post(url, json=payload, timeout=60)
+    resp.raise_for_status()
+
+    df = pd.read_csv(_io.StringIO(resp.text), sep=";")
+    df.columns = (
+        df.columns
+        .str.replace(" Calculated resolutions", "", regex=False)
+        .str.strip()
+    )
+
+    df["Start date"] = pd.to_datetime(df["Start date"])
+    df["End date"]   = pd.to_datetime(df["End date"])
+
+    for col in df.columns:
+        if col not in ("Start date", "End date"):
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).fillna(0)
+
+    export_cols = [c for c in df.columns if "(export)" in c.lower()]
+    import_cols = [c for c in df.columns if "(import)" in c.lower()]
+
+    # SMARD encodes imports as negative values — take absolute value
+    df[import_cols] = df[import_cols].abs()
+
+    df["Total_Export_MWh"] = df[export_cols].sum(axis=1)
+    df["Total_Import_MWh"] = df[import_cols].sum(axis=1)
+    df["Net_Trade_MWh"]    = df["Total_Export_MWh"] - df["Total_Import_MWh"]
+
+    return df
+
+
+def build_demand_balance_check(
+    df_generation: pd.DataFrame,
+    df_consumption: pd.DataFrame,
+    df_trade: pd.DataFrame,
+    renewable_cols: list,
+    conventional_cols: list,
+) -> pd.DataFrame:
+    """
+    Monthly system energy balance including cross-border trade.
+
+    Accounting identity:
+        Available = Generation (renewable + conventional) + Imports − Exports
+        Balance   = Available − Consumption   (should be ≈ 0; ~2–3% residual is normal)
+
+    Returns a monthly DataFrame with:
+        Month, Total Renewable Generation, Total Conventional Generation,
+        Consumption, Total_Export_MWh, Total_Import_MWh,
+        Available_Energy_MWh, Balance_MWh, Demand_Met (bool)
+    """
+    _gen = df_generation.copy()
+    _gen["Start date"] = pd.to_datetime(_gen["Date"])
+    _gen["Total Renewable Generation"]    = _gen[renewable_cols].sum(axis=1)
+    _gen["Total Conventional Generation"] = _gen[conventional_cols].sum(axis=1)
+    _gen["Month"] = _gen["Start date"].dt.to_period("M").astype(str)
+    _gen_m = (
+        _gen.groupby("Month")[
+            ["Total Renewable Generation", "Total Conventional Generation"]
+        ]
+        .sum()
+        .reset_index()
+    )
+
+    _cons = df_consumption[["Start date", "Consumption"]].copy()
+    _cons["Start date"] = pd.to_datetime(_cons["Start date"])
+    _cons["Month"] = _cons["Start date"].dt.to_period("M").astype(str)
+    _cons_m = _cons.groupby("Month")["Consumption"].sum().reset_index()
+
+    _trade = df_trade.copy()
+    _trade["Month"] = pd.to_datetime(_trade["Start date"]).dt.to_period("M").astype(str)
+    _trade_m = (
+        _trade.groupby("Month")[["Total_Export_MWh", "Total_Import_MWh"]]
+        .sum()
+        .reset_index()
+    )
+
+    out = _gen_m.merge(_cons_m, on="Month", how="inner")
+    out = out.merge(_trade_m, on="Month", how="inner")
+
+    out["Available_Energy_MWh"] = (
+        out["Total Renewable Generation"]
+        + out["Total Conventional Generation"]
+        + out["Total_Import_MWh"]
+        - out["Total_Export_MWh"]
+    )
+    out["Balance_MWh"] = out["Available_Energy_MWh"] - out["Consumption"]
+    out["Demand_Met"]  = out["Balance_MWh"] >= 0
+
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10.  WIND DIRECTION ANALYSIS
+#      The D column is already present in the same produkt_ff_*.txt files
+#      downloaded by dwd_download_all() — no extra download needed.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Compass rose: 8 cardinal + intercardinal directions, each covering 45°
+# Convention: 0°/360° = North, 90° = East, 180° = South, 270° = West
+DIRECTION_BINS   = [0, 45, 90, 135, 180, 225, 270, 315, 360]
+DIRECTION_LABELS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+# Prevailing westerlies: directions that bring Atlantic air → strongest winds in Germany
+WESTERLY_RANGE = (225, 315)   # SW–W–NW band
+
+
+def _dwd_parse_wind_with_direction(path: str) -> pd.DataFrame:
+    """
+    Parse a DWD wind file and return both F (speed, m/s) and D (direction, °).
+
+    D = 0°   → variable / calm (special DWD code — treated as NaN)
+    D = 360° → North (same as 0° meteorologically — kept as-is for binning)
+    D = -999 → missing → NaN
+    """
+    df = pd.read_csv(path, sep=";", encoding="latin-1")
+    df.columns = df.columns.str.strip()
+
+    df = df[["STATIONS_ID", "MESS_DATUM", "F", "D"]].copy()
+    df.columns = ["station_id", "ts", "wind_speed", "wind_dir"]
+
+    df["ts"] = pd.to_datetime(
+        df["ts"].astype(str), format="%Y%m%d%H", errors="coerce"
+    )
+    df["wind_speed"] = (
+        pd.to_numeric(df["wind_speed"], errors="coerce").replace(-999, float("nan"))
+    )
+    df["wind_dir"] = (
+        pd.to_numeric(df["wind_dir"], errors="coerce").replace(-999, float("nan"))
+    )
+    # D = 0 means "calm / variable" in DWD encoding — not a true direction
+    df.loc[df["wind_dir"] == 0, "wind_dir"] = float("nan")
+
+    return df.dropna(subset=["ts"])
+
+
+def load_wind_direction_all_stations(stations: dict = None) -> pd.DataFrame:
+    """
+    Load wind speed + direction for all stations from already-downloaded wind files.
+
+    Returns a long DataFrame with columns:
+        ts, station_id, station_name, wind_speed, wind_dir,
+        dir_bin (compass label: N/NE/E/SE/S/SW/W/NW),
+        is_westerly (bool: True when direction is in the SW–W–NW band)
+
+    Only rows where both F and D are valid are kept.
+    """
+    if stations is None:
+        stations = DWD_STATIONS
+
+    frames = []
+    for sid, name in stations.items():
+        matches = glob.glob(f"data/dwd/{sid}_wind/produkt_ff*.txt")
+        if not matches:
+            print(f"  ⚠️  No wind file found for {name} ({sid}) — skipping")
+            continue
+        df = _dwd_parse_wind_with_direction(matches[0])
+        df["station_name"] = name
+        frames.append(df)
+        print(f"  ✅  {name} ({sid}): {len(df):,} rows")
+
+    if not frames:
+        raise RuntimeError(
+            "No wind files found — run dwd_download_all() first, "
+            "then re-run this cell."
+        )
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.dropna(subset=["wind_speed", "wind_dir"])
+
+    # 8-direction compass bin
+    # pd.cut with right=False: [0,45) → N, [45,90) → NE, …, [315,360) → NW
+    # 360° wraps back to North — remap after cut
+    out["dir_bin"] = pd.cut(
+        out["wind_dir"],
+        bins=DIRECTION_BINS,
+        labels=DIRECTION_LABELS,
+        right=False,
+        include_lowest=True,
+    ).astype(str)
+    # 360° lands in the last bin (315–360] → same as N
+    out.loc[out["wind_dir"] == 360, "dir_bin"] = "N"
+
+    # Westerly flag: SW / W / NW
+    out["is_westerly"] = out["wind_dir"].between(
+        WESTERLY_RANGE[0], WESTERLY_RANGE[1]
+    )
+
+    return out.sort_values(["ts", "station_id"]).reset_index(drop=True)
+
+
+def wind_direction_station_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-station, per-direction summary:
+        count    — how many hours this direction was recorded
+        freq_pct — percentage of all hours at this station
+        mean_speed_ms — average wind speed when wind came from this direction
+        mean_speed_kmh — same in km/h (× 3.6)
+
+    Useful for comparing which directions dominate at each station.
+    """
+    total_per_station = df.groupby("station_name")["dir_bin"].count().rename("total")
+    grouped = (
+        df.groupby(["station_name", "dir_bin"])
+        .agg(
+            count=("wind_speed", "count"),
+            mean_speed_ms=("wind_speed", "mean"),
+        )
+        .reset_index()
+    )
+    grouped = grouped.merge(total_per_station, on="station_name")
+    grouped["freq_pct"]       = (grouped["count"] / grouped["total"] * 100).round(1)
+    grouped["mean_speed_kmh"] = (grouped["mean_speed_ms"] * 3.6).round(2)
+    grouped["mean_speed_ms"]  = grouped["mean_speed_ms"].round(2)
+
+    # Sort by compass order within each station
+    dir_order = {d: i for i, d in enumerate(DIRECTION_LABELS)}
+    grouped["_sort"] = grouped["dir_bin"].map(dir_order)
+    return (
+        grouped.sort_values(["station_name", "_sort"])
+        .drop(columns=["total", "_sort"])
+        .reset_index(drop=True)
+    )
+
+
+def wind_direction_generation_correlation(
+    df_wind_dir: pd.DataFrame,
+    df_generation: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Merge wind direction data with SMARD generation and compute mean Total_Wind
+    generation per compass direction per station.
+
+    Args:
+        df_wind_dir:   output of load_wind_direction_all_stations()
+        df_generation: SMARD hourly DataFrame with "Date" and "Total_Wind" columns
+
+    Returns a DataFrame with columns:
+        station_name, dir_bin, mean_wind_gen_mwh, mean_wind_speed_ms,
+        freq_pct, count
+    """
+    _gen = df_generation[["Date", "Total_Wind"]].copy()
+    _gen["ts"] = pd.to_datetime(_gen["Date"]).dt.floor("h")
+
+    _dir = df_wind_dir.copy()
+    _dir["ts"] = pd.to_datetime(_dir["ts"]).dt.floor("h")
+
+    merged = _dir.merge(_gen, on="ts", how="inner")
+
+    result = (
+        merged.groupby(["station_name", "dir_bin"])
+        .agg(
+            mean_wind_gen_mwh=("Total_Wind", "mean"),
+            mean_wind_speed_ms=("wind_speed", "mean"),
+            count=("wind_speed", "count"),
+        )
+        .reset_index()
+    )
+
+    total = merged.groupby("station_name")["dir_bin"].count().rename("total")
+    result = result.merge(total, on="station_name")
+    result["freq_pct"] = (result["count"] / result["total"] * 100).round(1)
+    result["mean_wind_gen_mwh"] = result["mean_wind_gen_mwh"].round(1)
+    result["mean_wind_speed_ms"] = result["mean_wind_speed_ms"].round(2)
+
+    dir_order = {d: i for i, d in enumerate(DIRECTION_LABELS)}
+    result["_sort"] = result["dir_bin"].map(dir_order)
+    return (
+        result.sort_values(["station_name", "_sort"])
+        .drop(columns=["total", "_sort"])
+        .reset_index(drop=True)
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11.  WIND DIRECTION — PRESENTATION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_wind_rose_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build wind-direction frequency table for wind rose charts.
+
+    Returns:
+        dir_bin, count, freq_pct
+    """
+    out = (
+        df.groupby("dir_bin")
+        .size()
+        .reset_index(name="count")
+    )
+
+    out["freq_pct"] = out["count"] / out["count"].sum() * 100
+
+    dir_order = {d: i for i, d in enumerate(DIRECTION_LABELS)}
+    out["_sort"] = out["dir_bin"].map(dir_order)
+
+    return (
+        out.sort_values("_sort")
+        .drop(columns="_sort")
+        .reset_index(drop=True)
+    )
+
+
+def build_direction_generation_summary(
+    df_wind_dir: pd.DataFrame,
+    df_generation: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Average wind generation by compass direction.
+
+    Returns:
+        dir_bin
+        avg_wind_generation_mwh
+        avg_wind_speed_ms
+        freq_pct
+    """
+
+    _gen = df_generation[["Date", "Total_Wind", "Renewable_Share_Pct"]].copy()
+    _gen["ts"] = pd.to_datetime(_gen["Date"]).dt.floor("h")
+
+    _dir = df_wind_dir.copy()
+    _dir["ts"] = pd.to_datetime(_dir["ts"]).dt.floor("h")
+
+    merged = _dir.merge(_gen, on="ts", how="inner")
+
+    out = (
+        merged.groupby("dir_bin")
+        .agg(
+            avg_wind_generation_mwh=("Total_Wind", "mean"),
+            avg_wind_speed_ms=("wind_speed", "mean"),
+            avg_renewable_share_pct=("Renewable_Share_Pct", "mean"),
+            count=("wind_speed", "count"),
+        )
+        .reset_index()
+    )
+
+    out["freq_pct"] = out["count"] / out["count"].sum() * 100
+
+    out["avg_wind_generation_mwh"] = (
+        out["avg_wind_generation_mwh"].round(1)
+    )
+
+    out["avg_wind_speed_ms"] = (
+        out["avg_wind_speed_ms"].round(2)
+    )
+
+    out["avg_renewable_share_pct"] = (
+        out["avg_renewable_share_pct"].round(1)
+    )
+
+    dir_order = {d: i for i, d in enumerate(DIRECTION_LABELS)}
+    out["_sort"] = out["dir_bin"].map(dir_order)
+
+    return (
+        out.sort_values("_sort")
+        .drop(columns="_sort")
+        .reset_index(drop=True)
+    )
