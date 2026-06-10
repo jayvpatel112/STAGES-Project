@@ -1005,6 +1005,12 @@ def _(end_date, load_smard_market_trade, start_date):
 
 @app.cell
 def _(df_smard_trade):
+    df_smard_trade.columns.tolist()
+    return
+
+
+@app.cell
+def _(df_smard_trade):
     export_cols = [
         col for col in df_smard_trade.columns
         if "(export)" in col.lower()
@@ -1430,6 +1436,281 @@ def _(mo):
     Import reduction = 72.94%
     """)
     return
+
+
+@app.cell
+def _(io, pd, requests):
+    def load_smard_day_ahead_prices_all(start_date, end_date):
+        url = "https://www.smard.de/nip-download-manager/nip/download/market-data"
+
+        start_ts = int(pd.to_datetime(start_date, utc=True).timestamp() * 1000)
+        end_ts = int(pd.to_datetime(end_date, utc=True).timestamp() * 1000)
+
+        payload = {
+            "request_form": [
+                {
+                    "format": "CSV",
+                    "moduleIds": [
+                        8004169,
+                        8004170,
+                        8000251,
+                        8005078,
+                        8000252,
+                        8000253,
+                        8000254,
+                        8000255,
+                        8000256,
+                        8000257,
+                        8000258,
+                        8000259,
+                        8000260,
+                        8000261,
+                        8000262,
+                        8004996,
+                        8004997
+                    ],
+                    "region": "DE",
+                    "timestamp_from": start_ts,
+                    "timestamp_to": end_ts,
+                    "type": "discrete",
+                    "language": "en",
+                    "resolution": "hour",
+                }
+            ]
+        }
+
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=60
+        )
+
+        if response.status_code != 200:
+            print(response.text)
+            raise Exception(f"SMARD request failed: {response.status_code}")
+
+        df_price_all = pd.read_csv(
+            io.StringIO(response.text),
+            sep=";"
+        )
+
+        df_price_all.columns = df_price_all.columns.str.strip()
+
+        df_price_all["Start date"] = pd.to_datetime(
+            df_price_all["Start date"],
+            errors="coerce"
+        )
+
+        return df_price_all
+
+    return (load_smard_day_ahead_prices_all,)
+
+
+@app.cell
+def _(end_date, load_smard_day_ahead_prices_all, start_date):
+    df_price_all = load_smard_day_ahead_prices_all(
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    df_price_all.head()
+    return (df_price_all,)
+
+
+@app.cell
+def _(df_price_all):
+    df_price_all.columns.tolist()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Burning fossil gas is typically the most expensive way to generate electricity. In 2025 the
+    average cost of electricity from gas ranged between €101/MWh and €112/MWh across the EU.
+    During peak gas-use hours in 2025, prices were on average 11% higher across the EU than in 2024. By contrast, in the hours when clean power (especially solar) was abundant, typically
+    between 7am and 4pm, wholesale electricity prices rose by only 3%. In Germany, for
+    instance, electricity prices jumped by 19% during high gas-use periods but grew only by 8%
+    when solar generation was plentiful.
+    https://ember-energy.org/app/uploads/2026/01/EMBER-Report-European-Electricity-Review-2026.pdf
+    """)
+    return
+
+
+@app.cell
+def _():
+    price_mapping = {
+        "Netherlands": "Netherlands [€/MWh] Calculated resolutions",
+        "Switzerland": "Switzerland [€/MWh] Calculated resolutions",
+        "Denmark": "Denmark 1 [€/MWh] Calculated resolutions",
+        "Czech Republic": "Czech Republic [€/MWh] Calculated resolutions",
+        "Luxembourg": "Germany/Luxembourg [€/MWh] Calculated resolutions",
+        "Sweden": "Sweden 4 [€/MWh] Calculated resolutions",
+        "Austria": "Austria [€/MWh] Calculated resolutions",
+        "France": "France [€/MWh] Calculated resolutions",
+        "Poland": "Poland [€/MWh] Calculated resolutions",
+        "Norway": "Norway 2 [€/MWh] Calculated resolutions",
+        "Belgium": "Belgium [€/MWh] Calculated resolutions",
+    }
+    return (price_mapping,)
+
+
+@app.cell
+def _(df_price_all, df_smard_trade, pd, price_mapping):
+    df_trade_cost = (
+        df_smard_trade.merge(
+            df_price_all,
+            on="Start date",
+            how="inner"
+        )
+    )
+
+    results = []
+
+    for country, price_col in price_mapping.items():
+
+        import_col = f"{country} (import) [MWh]"
+        export_col = f"{country} (export) [MWh]"
+
+        import_cost = (
+            df_trade_cost[import_col].abs()
+            * df_trade_cost[price_col]
+        ).sum()
+
+        export_revenue = (
+            df_trade_cost[export_col]
+            * df_trade_cost[price_col]
+        ).sum()
+
+        results.append({
+            "Country": country,
+            "Import Cost [Million €]": import_cost / 1e6,
+            "Export Revenue [Million €]": export_revenue / 1e6,
+            "Net Cost [Million €]":
+                (import_cost - export_revenue) / 1e6
+        })
+
+    df_country_costs = pd.DataFrame(results)
+
+    df_country_costs = df_country_costs.sort_values(
+        "Net Cost [Million €]",
+        ascending=False
+    )
+
+    df_country_costs.round(2)
+    return (df_country_costs,)
+
+
+@app.cell
+def _(df_country_costs, px):
+
+    df_net_cost = df_country_costs.sort_values(
+        "Net Cost [Million €]",
+        ascending=False
+    )
+
+    df_net_cost["Trade Balance"] = df_net_cost["Net Cost [Million €]"].apply(
+        lambda x: "Net Cost" if x > 0 else "Net Benefit"
+    )
+
+    fig_net_cost = px.bar(
+        df_net_cost,
+        x="Country",
+        y="Net Cost [Million €]",
+        color="Trade Balance",
+        title="Net Electricity Trade Cost by Country - Germany 2025"
+    )
+
+    fig_net_cost.show()
+    return
+
+
+@app.cell
+def _(df_country_costs):
+    df_country_costs["Net Cost [Million €]"].sum()
+    return
+
+
+@app.cell
+def _(df_country_costs):
+    total_import_cost_countrywise = (
+        df_country_costs["Import Cost [Million €]"].sum()
+        / 1000
+    )
+
+    total_export_revenue_countrywise = (
+        df_country_costs["Export Revenue [Million €]"].sum()
+        / 1000
+    )
+
+    net_trade_cost_countrywise = (
+        total_import_cost_countrywise
+        - total_export_revenue_countrywise
+    )
+
+    print(f"Import Cost: €{total_import_cost_countrywise:.2f} Billion")
+    print(f"Export Revenue: €{total_export_revenue_countrywise:.2f} Billion")
+    print(f"Net Trade Cost: €{net_trade_cost_countrywise:.2f} Billion")
+    return (
+        net_trade_cost_countrywise,
+        total_export_revenue_countrywise,
+        total_import_cost_countrywise,
+    )
+
+
+@app.cell
+def _(
+    net_trade_cost_countrywise,
+    pd,
+    px,
+    total_export_revenue_countrywise,
+    total_import_cost_countrywise,
+):
+    df_trade_summary_countrywise = pd.DataFrame({
+        "Metric": [
+            "Import Cost",
+            "Export Revenue",
+            "Net Trade Cost"
+        ],
+        "Value [Billion €]": [
+            total_import_cost_countrywise,
+            total_export_revenue_countrywise,
+            net_trade_cost_countrywise
+        ]
+    })
+
+    fig_trade_summary_countrywise = px.bar(
+        df_trade_summary_countrywise,
+        x="Metric",
+        y="Value [Billion €]",
+        text="Value [Billion €]",
+        title="Germany Electricity Trade Economics Using Country-wise Prices (2025)"
+    )
+
+    fig_trade_summary_countrywise.update_traces(
+        texttemplate="€%{y:.2f} bn",
+        textposition="outside"
+    )
+
+    fig_trade_summary_countrywise.update_layout(
+        yaxis_title="Billion €",
+        height=500
+    )
+
+    fig_trade_summary_countrywise.show()
+    return
+
+
+@app.cell
+def _(df_country_costs, df_smard_trade):
+    avg_price_countrywise = (
+        df_country_costs["Import Cost [Million €]"].sum() * 1_000_000
+        /
+        df_smard_trade["Total_Import_MWh"].sum()
+    )
+
+    print(avg_price_countrywise)
+    return (avg_price_countrywise,)
 
 
 @app.cell(hide_code=True)
@@ -1876,6 +2157,796 @@ def _(df_results5, px):
 
     fig_opt_final.update_layout(height=500)
     fig_opt_final.show()
+    return
+
+
+@app.cell
+def _(avg_price_countrywise, df_results5):
+    df_storage_economics = df_results5.copy()
+
+    df_storage_economics["Estimated Import Cost [Billion €]"] = (
+        df_storage_economics["Remaining Net Import [TWh]"]
+        * 1_000_000
+        * avg_price_countrywise
+        / 1e9
+    )
+
+    baseline_cost = (
+        df_storage_economics[
+            "Estimated Import Cost [Billion €]"
+        ].iloc[0]
+    )
+
+    df_storage_economics["Estimated Savings [Billion €]"] = (
+        baseline_cost
+        - df_storage_economics["Estimated Import Cost [Billion €]"]
+    )
+
+    df_storage_economics.round(3)
+    return (df_storage_economics,)
+
+
+@app.cell
+def _(df_storage_economics, go):
+
+
+    df_plot_eco = df_storage_economics[
+        df_storage_economics["Additional Storage [GWh]"] > 0
+    ].copy()
+
+    x_labels = ["+" + str(int(v)) for v in df_plot_eco["Additional Storage [GWh]"]]
+
+    fig_eco = go.Figure()
+
+    fig_eco.add_trace(go.Bar(
+        x=x_labels,
+        y=df_plot_eco["Estimated Import Cost [Billion €]"],
+        name="Estimated import cost",
+        marker_color="rgba(100, 149, 210, 0.85)",
+        marker_line_width=0,
+    ))
+
+    fig_eco.add_trace(go.Bar(
+        x=x_labels,
+        y=df_plot_eco["Estimated Savings [Billion €]"],
+        name="Estimated savings vs baseline",
+        marker_color="rgba(80, 180, 140, 0.85)",
+        marker_line_width=0,
+    ))
+
+    fig_eco.update_layout(
+        barmode="group",
+        bargap=0.20,
+        bargroupgap=0.05,
+        title=dict(
+            text="ESTIMATED IMPORT COST & SAVINGS BY STORAGE SIZE",
+            font=dict(size=14, color="#222"),
+            x=0, xanchor="left",
+        ),
+        legend=dict(
+            orientation="h",
+            x=0, y=1.10,
+            font=dict(size=12),
+            bgcolor="rgba(0,0,0,0)",
+            itemsizing="constant",
+        ),
+        xaxis=dict(
+            title="Additional storage on top of current 68 GWh (GWh)",
+            title_font=dict(size=13, color="#555"),
+            tickfont=dict(size=13, color="#444"),
+            showgrid=False,
+            zeroline=False,
+            linecolor="#ccc",
+        ),
+        yaxis=dict(
+            title="Billion €/year",
+            title_font=dict(size=13, color="#555"),
+            tickfont=dict(size=13, color="#444"),
+            tickprefix="€",
+            ticksuffix="B",
+            gridcolor="#e8e8e8",
+            gridwidth=1,
+            zeroline=True,
+            zerolinecolor="#bbb",
+            zerolinewidth=1,
+        ),
+        plot_bgcolor="#f7f7f5",
+        paper_bgcolor="white",
+        height=550,
+        margin=dict(t=100, b=70, l=80, r=40),
+    )
+
+    # baseline reference line (0 additional storage = full import cost)
+    baseline = df_storage_economics["Estimated Import Cost [Billion €]"].iloc[0]
+
+    fig_eco.add_hline(
+        y=baseline,
+        line_dash="dash",
+        line_color="#E24B4A",
+        line_width=1.5,
+        annotation_text=f"Baseline import cost (0 extra storage): €{baseline:.2f}B",
+        annotation_font_color="#E24B4A",
+        annotation_font_size=11,
+        annotation_position="top right",
+    )
+
+    fig_eco.show()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The analysis shows that Germany currently relies on electricity imports despite having a large renewable energy share. Based on the hourly trade and price data for 2025, the total electricity import expenditure was approximately €7.78 billion, while electricity exports generated approximately €4.13 billion in revenue. This resulted in a net electricity trade cost of €3.65 billion.
+
+    To evaluate the impact of additional storage capacity, several storage expansion scenarios were simulated. The current storage capacity of approximately 68 GWh serves as the baseline. Under this scenario, Germany still requires around 34.09 TWh of net imports per year and exports approximately 12.17 TWh of surplus electricity.
+
+    The results indicate that increasing storage capacity significantly reduces both exports and imports. With an additional 75 GWh of storage (total storage capacity of 143 GWh), net exports decrease from 12.17 TWh to 4.92 TWh, corresponding to an export reduction of 59.5%. At the same time, net imports decrease from 34.09 TWh to 28.01 TWh.
+
+    From an economic perspective, the estimated annual import expenditure decreases from approximately €3.05 billion to €2.50 billion, resulting in annual savings of approximately €543 million. Further storage expansion continues to reduce import dependence; however, the savings per additional GWh gradually decrease, indicating diminishing economic returns.
+    """)
+    return
+
+
+@app.cell
+def _(df_storage_economics, px):
+    fig_cost = px.line(
+        df_storage_economics,
+        x="Total Storage [GWh]",
+        y=[
+            "Estimated Import Cost [Billion €]",
+            "Estimated Savings [Billion €]"
+        ],
+        markers=True,
+        title="Economic Impact of Additional Storage Capacity (Without Storage Investment Costs)"
+    )
+
+    fig_cost.update_layout(
+        xaxis_title="Total Storage Capacity [GWh]",
+        yaxis_title="Billion €",
+        height=500
+    )
+
+    fig_cost.show()
+    return
+
+
+@app.cell
+def _(df_storage_economics):
+    import plotly.graph_objects as go
+
+    fig_storage_benefit = go.Figure()
+
+    fig_storage_benefit.add_trace(
+        go.Scatter(
+            x=df_storage_economics["Total Storage [GWh]"],
+            y=df_storage_economics["Remaining Net Import [TWh]"],
+            mode="lines+markers",
+            name="Remaining Net Import [TWh]"
+        )
+    )
+
+    fig_storage_benefit.add_trace(
+        go.Scatter(
+            x=df_storage_economics["Total Storage [GWh]"],
+            y=df_storage_economics["Estimated Savings [Billion €]"],
+            mode="lines+markers",
+            name="Estimated Savings [Billion €]",
+            yaxis="y2"
+        )
+    )
+
+    fig_storage_benefit.update_layout(
+        title="Storage Expansion: Technical and Economic Benefits (Without Storage Investment Costs)",
+        xaxis_title="Total Storage Capacity [GWh]",
+        yaxis=dict(
+            title="Remaining Net Import [TWh]"
+        ),
+        yaxis2=dict(
+            title="Estimated Savings [Billion €]",
+            overlaying="y",
+            side="right"
+        ),
+        height=550
+    )
+
+    fig_storage_benefit.show()
+    return (go,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Impact of additional storage capacity on Germany's net electricity imports and estimated annual savings. Savings are calculated from avoided import expenditure using average day-ahead electricity prices. Storage investment costs (CAPEX), operation and maintenance costs (OPEX), battery degradation, financing costs, and grid connection costs are not included.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Wider deployment and the commercialisation of new battery storage technologies has led to rapid cost reductions, notably for lithium-ion batteries, but also for high-temperature sodium-sulphur (“NAS”) and so-called “flow” batteries. Small-scale lithium-ion residential battery systems in the German market suggest that between 2014 and 2020, battery energy storage systems (BESS) prices fell by 71%, to USD 776/kWh. With their rapid cost declines, the role of BESS for stationary and transport applications is gaining prominence, but other technologies exist, including pumped hydro, flywheels, and thermal energy stores.
+    https://www.irena.org/Energy-Transition/Technology/Energy-storage-costs
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Storage Cost Analysis — LCOS Calculation
+
+       **Source: IRENA Electricity Storage Cost-of-Service Tool v2.0 (2025)**
+       International Renewable Energy Agency (168 member states)
+       https://www.irena.org/Energy-Transition/Technology/Energy-storage-costs
+
+       **Technology: Li-Ion LFP — 2025 Reference Case (directly from tool)**
+
+       For this analysis, **Lithium-ion LFP (Lithium Iron Phosphate)** is selected
+       as the storage technology. This is consistent with current utility-scale
+       battery deployments in Germany and the dominant technology in new installations.
+
+       | Parameter | Best | Reference | Worst | Unit |
+       |---|---|---|---|---|
+       | Energy installation cost | 67.4 | **195.0** | 283.6 | USD/kWh |
+       | Calendar lifetime | 28.3 | **17.0** | 7.1 | years |
+       | Cycle life | 20,000 | **5,000** | 2,000 | equiv. full cycles |
+       | Round-trip efficiency | 96.3% | **92.0%** | 86.7% | % |
+       | Depth of discharge | 100% | **90%** | 84% | % |
+       | Self-discharge | 0.09% | **0.10%** | 0.36% | % per day |
+       | Maintenance (storage) | 1.5% | **1.5%** | 1.5% | % of invest/yr |
+       | Maintenance (inverter) | 1.5% | **1.5%** | 1.5% | % of invest/yr |
+       | Interest rate | 3% | **3%** | 3% | % |
+       | Grid connection (HV incl. transformer) | 15+15 | **15+15** | 15+15 | USD/kW |
+
+       **Application: Spot Market Trading (arbitrage) — EPEX SPOT**
+       Closest match to energy shifting use case (storing surplus solar/wind)
+       Cycles/day: 2, Depth of discharge: 80%
+
+         > **Note:** The IRENA tool assumes 2 cycles/day for arbitrage applications.
+       > Our simulation shows Germany's current (2025) renewable surplus produces only
+       > **0.08 – 0.5 equivalent cycles/day** depending on storage size.
+       > This low utilization is the primary reason LCOS exceeds import prices in 2025,
+       > and directly motivates the renewable expansion.
+
+       **Note:** All parameters taken directly from IRENA tool cells.
+       No external estimates used.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Who owns the IRENA Cost-of-Service Tool
+    The organisation: IRENA — International Renewable Energy Agency
+
+    Intergovernmental body with 168 member states, headquartered in Abu Dhabi
+    The tool is maintained by its Innovation and Technology Centre (IITC), based in Bonn, Germany
+
+    The people directly responsible
+    Original tool authors (v1.0 & v2.0):
+    Contributing authors were Pablo Ralon, Michael Taylor, and Andrei Ilas (IRENA), with Harald Diaz-Bone (Green Budget Germany) and Kai-Philipp Kairies (Institute for Power Electronics and Electrical Drives, RWTH Aachen University). For feedback the contact is publications@irena.org
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    What the IRENA Cost-of-Service Tool v2.0 actually is
+    It's a spreadsheet-based tool that provides a quick analysis of the approximate annual cost of energy storage systems to help identify potentially cost-effective options. It's not a detailed simulation for investment decisions, but allows those interested in specific applications to access more detailed analysis to further evaluate suitability and performance under real-world conditions. IRENA
+    It enables users to undertake a rapid but robust analysis of the relative economic suitability of 13 different electricity storage technologies across 12 stationary storage applications. By modifying various parameters, users can account for a diverse range of project- and location-specific variables, from number of daily cycles to local financing costs.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    LFP specifically — why it's the right technology choice
+    LFP (Lithium Iron Phosphate) is the dominant grid-scale chemistry today for good reason:
+
+    Cycle life: Your Best Case assumes 20,000 cycles — industry sources confirm LFP can realistically deliver 15–20 years of service, far above other Li-ion chemistries
+    Safety: LFP has superior thermal and chemical stability vs. NMC (no cobalt, no nickel)
+    Cost: Battery storage project costs dropped 90% between 2010 and 2023, from $2,511/kWh to $273/kWh, driven by scaling up manufacturing, improving material efficiency, and refining industrial processes
+    """)
+    return
+
+
+@app.cell
+def _(avg_price_countrywise, df_results5, pd, px):
+    # ═══════════════════════════════════════════════════════════════════
+    # IRENA Cost-of-Service Tool v2.0 (2025) — Li-Ion LFP — Best Case Only
+    # ALL values taken directly from tool's Cost-of-Service sheet
+    # Source: https://www.irena.org/Energy-Transition/Technology/Energy-storage-costs
+    # ═══════════════════════════════════════════════════════════════════
+
+    irena_scenarios = {
+        "Best": {"capex_usd_kwh": 67.364, "lifetime": 28.333, "efficiency_rt": 0.96279, "dod": 0.90},
+    }
+
+    # Fixed parameters — same across all scenarios (from IRENA tool)
+    irena_maintenance_storage  = 0.015
+    irena_maintenance_inverter = 0.015
+    irena_maintenance_grid     = 0.010
+    irena_interest_rate        = 0.03
+    irena_self_discharge_day   = 0.001
+    irena_inverter_cost_usd_kw = 70.0
+    irena_grid_usd_kw          = 30.0
+    irena_usd_to_eur           = 0.924
+    irena_ep_ratio             = 0.667
+    irena_inverter_life        = 27.0
+    irena_grid_life            = 50.0
+
+    irena_baseline_twh = df_results5["Remaining Net Import [TWh]"].iloc[0]
+
+    irena_results = []
+
+    for irena_scenario_name, irena_p in irena_scenarios.items():
+
+        irena_capex_eur_kwh = irena_p["capex_usd_kwh"] * irena_usd_to_eur
+        irena_life          = irena_p["lifetime"]
+        irena_eff           = irena_p["efficiency_rt"]
+
+        irena_crf = (
+            irena_interest_rate * (1 + irena_interest_rate) ** irena_life
+            / ((1 + irena_interest_rate) ** irena_life - 1)
+        )
+
+        irena_crf_inv = (
+            irena_interest_rate * (1 + irena_interest_rate) ** irena_inverter_life
+            / ((1 + irena_interest_rate) ** irena_inverter_life - 1)
+        )
+
+        irena_crf_grid = (
+            irena_interest_rate * (1 + irena_interest_rate) ** irena_grid_life
+            / ((1 + irena_interest_rate) ** irena_grid_life - 1)
+        )
+
+        for _, irena_row in df_results5.iterrows():
+            irena_gwh = irena_row["Additional Storage [GWh]"]
+            irena_mwh = irena_gwh * 1_000
+            irena_kwh = irena_gwh * 1_000_000
+
+            irena_reduction_twh = irena_baseline_twh - irena_row["Remaining Net Import [TWh]"]
+            irena_mwh_out       = irena_reduction_twh * 1_000_000
+
+            if irena_gwh == 0 or irena_mwh_out <= 0:
+                irena_results.append({
+                    "Scenario":                         irena_scenario_name,
+                    "Additional Storage [GWh]":         0,
+                    "Equiv. Full Cycles/yr":            0,
+                    "LCOS [€/MWh]":                    None,
+                    "Annual Storage Cost [Billion €]":  0,
+                    "Annual Import Saving [Billion €]": 0,
+                    "Net Annual Benefit [Billion €]":   0,
+                })
+                continue
+
+            irena_cycles_yr = irena_mwh_out / irena_mwh
+
+            irena_invest_storage  = irena_kwh * irena_capex_eur_kwh
+            irena_annuity_storage = irena_invest_storage * irena_crf
+
+            irena_power_kw    = irena_mwh * 1000 / irena_ep_ratio
+            irena_invest_inv  = irena_power_kw * (irena_inverter_cost_usd_kw * irena_usd_to_eur)
+            irena_annuity_inv = irena_invest_inv * irena_crf_inv
+
+            irena_invest_grid  = irena_power_kw * (irena_grid_usd_kw * irena_usd_to_eur)
+            irena_annuity_grid = irena_invest_grid * irena_crf_grid
+
+            irena_maint = (
+                irena_invest_storage * irena_maintenance_storage
+                + irena_invest_inv   * irena_maintenance_inverter
+                + irena_invest_grid  * irena_maintenance_grid
+            )
+
+            irena_eff_loss_eur = (
+                irena_mwh_out * (1 - irena_eff) / irena_eff * avg_price_countrywise
+            )
+
+            irena_selfdis_eur = (
+                irena_mwh * irena_self_discharge_day * 365 * avg_price_countrywise
+            )
+
+            irena_total_cost = (
+                irena_annuity_storage
+                + irena_annuity_inv
+                + irena_annuity_grid
+                + irena_maint
+                + irena_eff_loss_eur
+                + irena_selfdis_eur
+            )
+
+            irena_lcos        = irena_total_cost / irena_mwh_out
+            irena_saving      = irena_mwh_out * avg_price_countrywise
+            irena_net_benefit = irena_saving - irena_total_cost
+
+            irena_results.append({
+                "Scenario":                         irena_scenario_name,
+                "Additional Storage [GWh]":         irena_gwh,
+                "Equiv. Full Cycles/yr":            round(irena_cycles_yr, 1),
+                "LCOS [€/MWh]":                    round(irena_lcos, 1),
+                "Annual Storage Cost [Billion €]":  round(irena_total_cost / 1e9, 3),
+                "Annual Import Saving [Billion €]": round(irena_saving / 1e9, 3),
+                "Net Annual Benefit [Billion €]":   round(irena_net_benefit / 1e9, 3),
+            })
+
+    df_irena_lcos = pd.DataFrame(irena_results)
+
+    fig_lcos = px.line(
+        df_irena_lcos[df_irena_lcos["LCOS [€/MWh]"].notna()],
+        x="Additional Storage [GWh]",
+        y="LCOS [€/MWh]",
+        title="LCOS by Storage Size — IRENA Li-Ion LFP 2025 (Best Case)",
+        labels={
+            "Additional Storage [GWh]": "Additional Storage on top of current 68 GWh [GWh]",
+            "LCOS [€/MWh]": "LCOS [€/MWh]",
+        },
+        markers=True,
+    )
+    fig_lcos.add_hline(
+        y=avg_price_countrywise,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"Avg German import price: €{avg_price_countrywise:.1f}/MWh",
+        annotation_position="top right"
+    )
+    fig_lcos.update_layout(height=500)
+    fig_lcos.show()
+
+    df_irena_lcos
+    return (df_irena_lcos,)
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(df_irena_lcos):
+    def _():
+        import plotly.graph_objects as go
+
+        df_plot = df_irena_lcos[
+            (df_irena_lcos["Scenario"] == "Best") &
+            (df_irena_lcos["LCOS [€/MWh]"].notna()) &
+            (df_irena_lcos["Additional Storage [GWh]"] > 0)
+        ].copy()
+
+        df_plot["Net Loss [Billion €]"] = (
+            df_plot["Annual Storage Cost [Billion €]"]
+            - df_plot["Annual Import Saving [Billion €]"]
+        )
+
+        x_labels = ["+" + str(int(v)) for v in df_plot["Additional Storage [GWh]"]]
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=df_plot["Annual Storage Cost [Billion €]"],
+            name="Annual storage cost",
+            marker_color="rgba(100, 149, 210, 0.85)",
+            marker_line_width=0,
+        ))
+
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=df_plot["Annual Import Saving [Billion €]"],
+            name="Annual import saving",
+            marker_color="rgba(80, 180, 140, 0.85)",
+            marker_line_width=0,
+        ))
+
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=df_plot["Net Loss [Billion €]"],
+            name="Net loss (cost − saving)",
+            marker_color=[
+                "rgba(80,180,140,0.85)" if v <= 0 else "rgba(220,120,120,0.85)"
+                for v in df_plot["Net Loss [Billion €]"]
+            ],
+            marker_line_width=0,
+        ))
+
+        fig.update_layout(
+            barmode="group",
+            bargap=0.20,
+            bargroupgap=0.05,
+            title=dict(
+                text="ANNUAL COST VS SAVINGS — DOES MORE STORAGE PAY OFF?",
+                font=dict(size=14, color="#222"),
+                x=0, xanchor="left",
+            ),
+            legend=dict(
+                orientation="h",
+                x=0, y=1.10,
+                font=dict(size=12),
+                bgcolor="rgba(0,0,0,0)",
+                itemsizing="constant",
+            ),
+            xaxis=dict(
+                title="Additional storage (GWh)",
+                title_font=dict(size=13, color="#555"),
+                tickfont=dict(size=13, color="#444"),
+                showgrid=False,
+                zeroline=False,
+                linecolor="#ccc",
+            ),
+            yaxis=dict(
+                title="Billion €/year",
+                title_font=dict(size=13, color="#555"),
+                tickfont=dict(size=13, color="#444"),
+                tickprefix="€",
+                ticksuffix="B",
+                gridcolor="#e8e8e8",
+                gridwidth=1,
+                zeroline=True,
+                zerolinecolor="#bbb",
+                zerolinewidth=1,
+                range=[-0.1, 4.2],
+            ),
+            plot_bgcolor="#f7f7f5",
+            paper_bgcolor="white",
+            height=550,           # taller = bars easier to read
+            margin=dict(t=100, b=70, l=80, r=40),
+        )
+        return fig.show()
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Storage alone cannot fix Germany's import dependency. Only +10 GWh is economically viable today with 2025 renewable surplus levels. Making larger storage profitable requires a much bigger renewable fleet — enough to generate the surplus cycles that spread fixed capital costs.
+    """)
+    return
+
+
+@app.cell
+def _(
+    df_price_all,
+    df_smard_consumption,
+    df_smard_generation,
+    pd,
+    px,
+    renewable_cols,
+):
+    df_surplus_price = df_smard_generation.copy()
+
+    df_surplus_price["Renewable Generation"] = (
+        df_surplus_price[renewable_cols].sum(axis=1)
+    )
+
+    df_surplus_price = df_surplus_price[
+        ["Start date", "Renewable Generation"]
+    ].merge(
+        df_smard_consumption[["Start date", "Consumption"]],
+        on="Start date",
+        how="inner"
+    ).merge(
+        df_price_all[
+            [
+                "Start date",
+                "Germany/Luxembourg [€/MWh] Calculated resolutions"
+            ]
+        ],
+        on="Start date",
+        how="inner"
+    ).rename(columns={
+        "Germany/Luxembourg [€/MWh] Calculated resolutions": "Price [€/MWh]"
+    })
+
+    df_surplus_price["Net [MWh]"] = (
+        df_surplus_price["Renewable Generation"]
+        - df_surplus_price["Consumption"]
+    )
+
+    df_surplus_price["Type"] = df_surplus_price["Net [MWh]"].apply(
+        lambda x: "Renewable Surplus" if x > 0 else "Renewable Deficit"
+    )
+
+    threshold_negative = -1
+    threshold_near_zero = 10
+
+    sp_surplus_hours = (df_surplus_price["Net [MWh]"] > 0).sum()
+    sp_negative_real = (df_surplus_price["Price [€/MWh]"] < threshold_negative).sum()
+    sp_near_zero = (df_surplus_price["Price [€/MWh]"] < threshold_near_zero).sum()
+
+    sp_surplus_negative = (
+        (df_surplus_price["Net [MWh]"] > 0)
+        & (df_surplus_price["Price [€/MWh]"] < threshold_negative)
+    ).sum()
+
+    sp_surplus_near_zero = (
+        (df_surplus_price["Net [MWh]"] > 0)
+        & (df_surplus_price["Price [€/MWh]"] < threshold_near_zero)
+    ).sum()
+
+    print(f"Renewable surplus hours 2025:                      {sp_surplus_hours}")
+    print(f"Hours with real negative prices (<-1 €/MWh):       {sp_negative_real}")
+    print(f"Hours with near-zero prices (<10 €/MWh):           {sp_near_zero}")
+    print(f"Renewable surplus + real negative price:           {sp_surplus_negative}")
+    print(f"Renewable surplus + near-zero (<10 €/MWh):         {sp_surplus_near_zero}")
+
+    if sp_negative_real > 0:
+        print(
+            f"% of real negative price hours = renewable surplus: "
+            f"{sp_surplus_negative / sp_negative_real * 100:.1f}%"
+        )
+
+    print("\nPrice distribution:")
+    print(f"  Below -50 €/MWh:   {(df_surplus_price['Price [€/MWh]'] < -50).sum()} hours")
+    print(f"  -50 to -1 €/MWh:   {((df_surplus_price['Price [€/MWh]'] >= -50) & (df_surplus_price['Price [€/MWh]'] < -1)).sum()} hours")
+    print(f"  -1 to 0 €/MWh:     {((df_surplus_price['Price [€/MWh]'] >= -1) & (df_surplus_price['Price [€/MWh]'] < 0)).sum()} hours")
+    print(f"  0 to 10 €/MWh:     {((df_surplus_price['Price [€/MWh]'] >= 0) & (df_surplus_price['Price [€/MWh]'] < 10)).sum()} hours")
+
+
+    # --------------------------------------------------
+    # Monthly grouped bar chart
+    # --------------------------------------------------
+
+    df_surplus_price["Month"] = df_surplus_price["Start date"].dt.strftime("%b")
+    df_surplus_price["Month_num"] = df_surplus_price["Start date"].dt.month
+
+    monthly_surplus_price = (
+        df_surplus_price
+        .groupby(["Month", "Month_num"])
+        .agg(
+            Renewable_Surplus_Hours=("Net [MWh]", lambda x: (x > 0).sum()),
+            Negative_Price_Hours=("Price [€/MWh]", lambda x: (x < threshold_negative).sum()),
+            Near_Zero_Price_Hours=("Price [€/MWh]", lambda x: (x < threshold_near_zero).sum()),
+            Average_Price_EUR_MWh=("Price [€/MWh]", "mean")
+        )
+        .reset_index()
+        .sort_values("Month_num")
+    )
+
+    fig_monthly_simple = px.bar(
+        monthly_surplus_price,
+        x="Month",
+        y=[
+            "Renewable_Surplus_Hours",
+            "Negative_Price_Hours"
+        ],
+        barmode="group",
+        title="Monthly Renewable Surplus and Negative Price Hours — Germany 2025",
+        labels={
+            "value": "Number of Hours",
+            "variable": "Category",
+            "Month": "Month"
+        }
+    )
+
+    fig_monthly_simple.update_layout(
+        height=500,
+        yaxis_title="Number of Hours",
+        xaxis_title="Month"
+    )
+
+    fig_monthly_simple.show()
+
+
+    # --------------------------------------------------
+    # Summary stacked bar
+    # --------------------------------------------------
+
+    summary_counts = pd.DataFrame({
+        "Category": [
+            "Renewable Surplus + Negative Price",
+            "Renewable Surplus + Non-negative Price",
+            "Renewable Deficit"
+        ],
+        "Hours": [
+            sp_surplus_negative,
+            sp_surplus_hours - sp_surplus_negative,
+            len(df_surplus_price) - sp_surplus_hours
+        ]
+    })
+
+    fig_summary_surplus = px.bar(
+        summary_counts,
+        x="Hours",
+        y=["2025"] * len(summary_counts),
+        color="Category",
+        orientation="h",
+        text="Hours",
+        title="2025 Hourly Renewable Balance and Negative Price Summary"
+    )
+
+    fig_summary_surplus.update_traces(
+        textposition="inside"
+    )
+
+    fig_summary_surplus.update_layout(
+        xaxis_title="Number of Hours",
+        yaxis_title="Year",
+        height=350
+    )
+
+    fig_summary_surplus.show()
+
+    monthly_surplus_price
+    return (df_surplus_price,)
+
+
+@app.cell
+def _(df_surplus_price):
+    total_renewable_surplus_mwh = (
+        df_surplus_price["Net [MWh]"]
+        .clip(lower=0)
+        .sum()
+    )
+
+    total_renewable_deficit_mwh = (
+        df_surplus_price["Net [MWh]"]
+        .clip(upper=0)
+        .abs()
+        .sum()
+    )
+
+    total_renewable_surplus_twh = total_renewable_surplus_mwh / 1_000_000
+    total_renewable_deficit_twh = total_renewable_deficit_mwh / 1_000_000
+
+    print(f"Total renewable surplus in 2025: {total_renewable_surplus_twh:.2f} TWh")
+    print(f"Total renewable deficit in 2025: {total_renewable_deficit_twh:.2f} TWh")
+    return
+
+
+@app.cell
+def _(df_surplus_price):
+    surplus_hours = df_surplus_price[df_surplus_price["Net [MWh]"] > 0]
+
+    print("Number of surplus hours:", len(surplus_hours))
+
+    print(
+        "Average surplus during surplus hours [MWh]:",
+        surplus_hours["Net [MWh]"].mean()
+    )
+
+    print(
+        "Maximum surplus hour [MWh]:",
+        surplus_hours["Net [MWh]"].max()
+    )
+
+    print(
+        "Total surplus [TWh]:",
+        surplus_hours["Net [MWh]"].sum() / 1_000_000
+    )
+    return
+
+
+@app.cell
+def _(df_surplus_price):
+    # Manual verification — rows with renewable surplus AND negative price
+    df_verify_sp = df_surplus_price[
+        (df_surplus_price["Net [MWh]"] > 0) &
+        (df_surplus_price["Price [€/MWh]"] < 0)
+    ].copy()
+
+    print(f"Rows with renewable surplus + negative price: {len(df_verify_sp)}")
+    print(f"\nSample of these hours:")
+    print(df_verify_sp[[
+        "Start date",
+        "Renewable Generation",
+        "Consumption",
+        "Net [MWh]",
+        "Price [€/MWh]"
+    ]].head(20).to_string())
+
+    print(f"\nMonth breakdown:")
+    df_verify_sp["Month"] = df_verify_sp["Start date"].dt.month
+    print(df_verify_sp.groupby("Month")["Net [MWh]"].count())
+
+    print(f"\nHour of day breakdown:")
+    df_verify_sp["Hour"] = df_verify_sp["Start date"].dt.hour
+    print(df_verify_sp.groupby("Hour")["Net [MWh]"].count())
     return
 
 
