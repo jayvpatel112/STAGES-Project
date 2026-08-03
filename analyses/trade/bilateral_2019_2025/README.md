@@ -8,9 +8,9 @@ no API key.
 ## Run it
 
 ```
-cd analyses/electricity_trade_2019_2025
+cd analyses/trade/bilateral_2019_2025
 pip install -r requirements.txt
-python -m marimo edit trade_notebook.py
+python -m marimo edit bilateral_trade_analysis.py
 ```
 
 Click **Fetch data and export PNG + PGF figures**. The first run downloads seven

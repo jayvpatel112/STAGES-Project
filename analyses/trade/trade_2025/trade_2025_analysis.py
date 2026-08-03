@@ -14,18 +14,16 @@ def _():
     import re
     import sys
 
-    # Make sure this notebook can import utils.py when it is placed in the project root.
-    ROOT = Path(__file__).resolve().parent
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
+    # This notebook lives under analyses/trade/trade_2025 but uses the shared
+    # project helpers and cleaned SMARD data from the repository root.
+    PROJECT_ROOT = Path(__file__).resolve().parents[3]
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
 
     from utils import load_smard_market_trade, smard_load
 
-    DATA_CLEANED = ROOT / "data" / "cleaned"
-    REPORTS = ROOT / "reports"
-    FIGURES = ROOT / "figures"
-    for folder in [DATA_CLEANED, REPORTS, FIGURES]:
-        folder.mkdir(parents=True, exist_ok=True)
+    DATA_CLEANED = PROJECT_ROOT / "data" / "cleaned"
+    DATA_CLEANED.mkdir(parents=True, exist_ok=True)
     return DATA_CLEANED, load_smard_market_trade, mo, pd, px, re, smard_load
 
 
@@ -515,7 +513,7 @@ def _(daily_trade_2025, mo, pd, smard_load):
     df_energy_for_trade = try_load_energy_for_trade()
 
     if df_energy_for_trade is None:
-        mo.md(
+        trade_energy_status = mo.md(
             """
     ## 6. Trade vs renewable generation
 
@@ -536,7 +534,7 @@ def _(daily_trade_2025, mo, pd, smard_load):
         )
         energy_daily_for_trade["Date"] = pd.to_datetime(energy_daily_for_trade["Date"]).dt.normalize()
         daily_trade_energy = daily_trade_2025.merge(energy_daily_for_trade, on="Date", how="inner")
-        mo.md(
+        trade_energy_status = mo.md(
             f"""
     ## 6. Trade vs renewable generation
 
@@ -550,6 +548,7 @@ def _(daily_trade_2025, mo, pd, smard_load):
     This lets us test whether Germany imports more during low-renewable days and exports more during high-renewable days.
     """
         )
+    trade_energy_status
     return (daily_trade_energy,)
 
 
@@ -561,7 +560,7 @@ def _(daily_trade_energy, mo):
         corr_import_renewable_share = daily_trade_energy["Import TWh"].corr(daily_trade_energy["Renewable Share of Load [%]"])
         corr_export_renewable_share = daily_trade_energy["Export TWh"].corr(daily_trade_energy["Renewable Share of Load [%]"])
 
-        mo.md(
+        correlation_summary = mo.md(
             f"""
     ### Relationship between trade and renewables
 
@@ -584,6 +583,12 @@ def _(daily_trade_energy, mo):
         corr_net_trade_residual_load = None
         corr_import_renewable_share = None
         corr_export_renewable_share = None
+        correlation_summary = mo.md(
+            "### Relationship between trade and renewables\n\n"
+            "The shared daily energy dataset is unavailable, so the "
+            "correlation analysis is skipped."
+        )
+    correlation_summary
     return
 
 
@@ -603,10 +608,9 @@ def _(daily_trade_energy, px):
         )
         fig_trade_vs_renewable_share.add_hline(y=0, line_dash="dash")
         fig_trade_vs_renewable_share.update_layout(height=500)
-        fig_trade_vs_renewable_share
     else:
         fig_trade_vs_renewable_share = None
-        fig_trade_vs_renewable_share
+    fig_trade_vs_renewable_share
     return
 
 
@@ -623,10 +627,9 @@ def _(daily_trade_energy, px):
         )
         fig_trade_vs_residual_load.add_hline(y=0, line_dash="dash")
         fig_trade_vs_residual_load.update_layout(height=500)
-        fig_trade_vs_residual_load
     else:
         fig_trade_vs_residual_load = None
-        fig_trade_vs_residual_load
+    fig_trade_vs_residual_load
     return
 
 

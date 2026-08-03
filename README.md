@@ -7,14 +7,14 @@ renewable generation, cross-border trade, and storage.
 
 - `stages_analysis.py` — main electricity and weather analysis
 - `storage.py` — storage and self-sufficiency analysis
-- `trade_analysis_2025.py` — existing 2025 trade analysis
 - `utils.py` — shared data-loading helpers
 
 ## Additional report analyses
 
-The `analyses/` directory contains self-contained investigations that support
-specific chapters of the report. See `analyses/README.md` for their purpose and
-run commands.
+The `analyses/` directory contains the detailed quarterly and trade
+investigations that support specific chapters of the report. This includes the
+2025 trade notebook, which previously lived at the repository root. See
+`analyses/README.md` for the complete notebook map and run commands.
 
 ## Environment
 

@@ -12,9 +12,9 @@
 ## Quick start
 
 ```bash
-cd analyses/net_importer_2019_2025
+cd analyses/trade/shortage_or_strategy_2019_2025
 pip install -r requirements.txt
-python -m marimo edit notebook.py
+python -m marimo edit net_importer_analysis.py
 ```
 
 Then, in the notebook, click the green **“Fetch / refresh real data from SMARD.de”**
@@ -56,7 +56,8 @@ are recreated by the notebook.
 ## What's inside
 
 The notebook is fully self-contained: the SMARD fetching logic, the data processing,
-the plot styling helpers, and every chart are all defined in `notebook.py` itself.
+the plot styling helpers, and every chart are all defined in
+`net_importer_analysis.py` itself.
 There are no separate data scripts to run.
 
 It answers nine connected questions, then ends with an interactive dashboard:
