@@ -23,3 +23,14 @@ data/dwd/*_solar/
 
 # Generated trade data
 data/cleaned/smard_trade_2025_country_hourly.csv
+
+# Generated outputs from self-contained analyses
+analyses/**/data/_cache/
+analyses/quarterly_2025/q1/data/raw/*
+!analyses/quarterly_2025/q1/data/raw/.gitkeep
+analyses/quarterly_2025/q1/data/processed/*
+!analyses/quarterly_2025/q1/data/processed/.gitkeep
+analyses/**/figures/*
+!analyses/**/figures/.gitkeep
+analyses/**/reports/*
+!analyses/**/reports/.gitkeep
