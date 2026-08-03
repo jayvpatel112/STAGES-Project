@@ -1,0 +1,54 @@
+% COPY-PASTE GUIDE FOR THE ELECTRICITY TRADE CHAPTER
+% The main thesis already defines \safepgfinput.
+
+% 1. Add this macro before \begin{document}. It is deliberately named
+%    \notebookpgffigure so it does not conflict with the old PNG macro.
+\newcommand{\notebookpgffigure}[3]{%
+  \begin{figure}[!htbp]
+    \centering
+    \safepgfinput{figures/#1}
+    \caption{#2}
+    \label{#3}
+  \end{figure}%
+}
+
+% 2. In the Electricity Trade chapter, replace the nine old
+%    \notebookfigure{...png}{caption}{label} calls with the calls below.
+
+\notebookpgffigure{trade_01_annual_net_balance.pgf}
+  {Annual net electricity balance for Germany, 2019--2025. Positive bars mark
+   net-export years; negative bars mark net-import years.}
+  {fig:trade_annual_net}
+
+\notebookpgffigure{trade_02_gross_imp_exp.pgf}
+  {Gross annual electricity exports and imports, Germany, 2019--2025.}
+  {fig:trade_gross}
+
+\notebookpgffigure{trade_03_stacked_by_neighbour.pgf}
+  {Annual net trade by neighbour, stacked, 2019--2025.}
+  {fig:trade_stacked}
+
+\notebookpgffigure{trade_04_partners_imp_exp.pgf}
+  {Gross imports from and exports to each neighbour, 2019--2025 totals.}
+  {fig:trade_partners}
+
+\notebookpgffigure{trade_05_net_per_neighbour.pgf}
+  {Net position by neighbour, 2019--2025 total.}
+  {fig:trade_net_partner}
+
+\notebookpgffigure{trade_06_heatmap.pgf}
+  {Net trade by neighbour and year, 2019--2025.}
+  {fig:trade_heat}
+
+\notebookpgffigure{trade_07_monthly_seasonal.pgf}
+  {Monthly net electricity balance, Germany, 2019--2025.}
+  {fig:trade_monthly}
+
+\notebookpgffigure{trade_08_month_year_heatmap.pgf}
+  {Monthly net electricity balance, arranged by month and year, showing both
+   the seasonal cycle and the multi-year drift.}
+  {fig:trade_month_year}
+
+\notebookpgffigure{trade_09_relationship_evolution.pgf}
+  {Evolution of each trading relationship, 2019--2025.}
+  {fig:trade_evolution}

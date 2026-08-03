@@ -1,0 +1,4 @@
+marimo>=0.9
+matplotlib>=3.8
+numpy>=1.26
+pandas>=2.1
