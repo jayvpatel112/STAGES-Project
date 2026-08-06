@@ -149,45 +149,71 @@ def data_layer(BASE_URL, CACHE, NEIGHBOUR_ALIASES, json, np, pd, time, urllib):
         return get_json(url, f"cbet_de_{year}.json")
 
     def parse_cbet(payload):
-        """Return (frame_MW, diagnostics) — canonical neighbour columns in MW."""
+        """Return German net exports, imports, and exports in MW.
+
+        Energy-Charts ``/cbet`` reports scheduled commercial exchanges in GW
+        using the source convention positive = import and negative = export.
+        The returned net frame is converted to the thesis convention
+        positive = German export and negative = German import.
+
+        Gross imports and exports are separated before bidding zones belonging
+        to the same country are combined. This avoids understating gross flows
+        when Germany imports through one zone and exports through another in
+        the same interval.
+        """
         secs = payload.get("unix_seconds") or []
         idx = pd.to_datetime(np.array(secs, dtype="int64"), unit="s", utc=True)
         countries = payload.get("countries") or []
 
-        matched, unmatched = {}, []
+        net_export, imports, exports, unmatched = {}, {}, {}, []
         for entry in countries:
             raw_name = str(entry.get("name", "")).strip()
             canon = NEIGHBOUR_ALIASES.get(raw_name.lower())
             if canon is None:
                 unmatched.append(raw_name)
                 continue
-            s = pd.Series(entry.get("data") or [], index=idx, dtype="float64")
-            matched[canon] = matched.get(canon, 0) + s if canon in matched else s
+            source_gw = pd.Series(
+                entry.get("data") or [], index=idx, dtype="float64")
+            source_mw = source_gw * 1000.0
 
-        df = pd.DataFrame(matched).sort_index()
+            # Energy-Charts source sign: + import, - export.
+            import_mw = source_mw.clip(lower=0)
+            export_mw = -source_mw.clip(upper=0)
+            net_export_mw = -source_mw
 
-        if len(df) >= 2:
+            for target, series in (
+                (net_export, net_export_mw),
+                (imports, import_mw),
+                (exports, export_mw),
+            ):
+                target[canon] = (
+                    target[canon].add(series, fill_value=0)
+                    if canon in target else series
+                )
+
+        net_export_df = pd.DataFrame(net_export).sort_index()
+        import_df = pd.DataFrame(imports).sort_index()
+        export_df = pd.DataFrame(exports).sort_index()
+
+        if len(net_export_df) >= 2:
             step_min = float(
-                np.median(np.diff(df.index.values)
+                np.median(np.diff(net_export_df.index.values)
                           .astype("timedelta64[m]").astype(int))
             )
             step_h = step_min / 60.0
         else:
             step_h = 1.0
 
-        # Detect units: MW ~10^2..10^4; GW would be tiny. If almost every
-        # value is under 30, assume GW and convert to MW.
-        max_abs = float(np.nanmax(np.abs(df.values))) if df.size else 0.0
-        unit_guess = "MW"
-        if 0 < max_abs < 30:
-            df = df * 1000.0
-            unit_guess = "GW->MW"
-
-        return df, {
+        max_abs_gw = (
+            float(np.nanmax(np.abs(net_export_df.values))) / 1000.0
+            if net_export_df.size else 0.0
+        )
+        return net_export_df, import_df, export_df, {
             "unmatched": sorted(set(unmatched)),
             "step_h": step_h,
-            "unit_guess": unit_guess,
-            "max_abs_before": max_abs,
+            "source_unit": "GW",
+            "converted_unit": "MW",
+            "max_abs_source_gw": max_abs_gw,
         }
 
     return fetch_cbet_year, parse_cbet
@@ -219,15 +245,26 @@ def fetch(YEARS, fetch_button, fetch_cbet_year, mo, np, parse_cbet, pd):
     mo.stop(not fetch_button.value,
             mo.md("*Click the green button above to load data.*"))
 
-    _frames = []
+    _net_frames = []
+    _import_frames = []
+    _export_frames = []
     diag = {}
     for _y in YEARS:
-        _df, _d = parse_cbet(fetch_cbet_year(_y))
-        _frames.append(_df)
+        _net, _imports, _exports, _d = parse_cbet(fetch_cbet_year(_y))
+        _net_frames.append(_net)
+        _import_frames.append(_imports)
+        _export_frames.append(_exports)
         diag[_y] = _d
 
-    raw_mw = pd.concat(_frames).sort_index()
-    raw_mw = raw_mw[~raw_mw.index.duplicated(keep="first")]
+    raw_net_export_mw = pd.concat(_net_frames).sort_index()
+    raw_import_mw = pd.concat(_import_frames).sort_index()
+    raw_export_mw = pd.concat(_export_frames).sort_index()
+    raw_net_export_mw = raw_net_export_mw[
+        ~raw_net_export_mw.index.duplicated(keep="first")]
+    raw_import_mw = raw_import_mw[
+        ~raw_import_mw.index.duplicated(keep="first")]
+    raw_export_mw = raw_export_mw[
+        ~raw_export_mw.index.duplicated(keep="first")]
 
     step_h = float(np.mean([diag[_y]["step_h"] for _y in YEARS
                             if diag[_y]["step_h"]]))
@@ -235,38 +272,65 @@ def fetch(YEARS, fetch_button, fetch_cbet_year, mo, np, parse_cbet, pd):
                               for n in diag[_y]["unmatched"]})
 
     # MW * step_h = MWh per interval
-    energy_mwh = raw_mw * step_h
-    data_ready = raw_mw.shape[0] > 0
+    energy_net_export_mwh = raw_net_export_mw * step_h
+    energy_import_mwh = raw_import_mw * step_h
+    energy_export_mwh = raw_export_mw * step_h
+    data_ready = raw_net_export_mw.shape[0] > 0
 
-    _found = ", ".join(raw_mw.columns) if data_ready else "—"
+    _found = ", ".join(raw_net_export_mw.columns) if data_ready else "—"
     _ignored = ", ".join(unmatched_names) if unmatched_names else "none"
 
     diag_banner = mo.md(
         f"""
         ### Data loaded
 
-        - **{len(raw_mw):,}** time steps at **{step_h * 60:.0f} min** resolution
-        - Period: **{raw_mw.index.min():%Y-%m-%d} → {raw_mw.index.max():%Y-%m-%d}**
+        - **{len(raw_net_export_mw):,}** time steps at **{step_h * 60:.0f} min** resolution
+        - Period: **{raw_net_export_mw.index.min():%Y-%m-%d} → {raw_net_export_mw.index.max():%Y-%m-%d}**
         - Neighbours found: **{_found}**
         - Aggregate/non-neighbour rows ignored: *{_ignored}*
+        - Source convention: **positive = German import, negative = German export**
+        - Analysis convention: **positive = German net export**
         """
     )
     diag_banner
-    return data_ready, energy_mwh
+    return (
+        data_ready,
+        energy_export_mwh,
+        energy_import_mwh,
+        energy_net_export_mwh,
+    )
 
 
 @app.cell
-def aggregate(data_ready, energy_mwh, mo, pd):
+def aggregate(
+    data_ready,
+    energy_export_mwh,
+    energy_import_mwh,
+    energy_net_export_mwh,
+    mo,
+    pd,
+):
     mo.stop(not data_ready)
 
-    twh = energy_mwh / 1e6
+    net_export_twh = energy_net_export_mwh / 1e6
+    export_twh = energy_export_mwh / 1e6
+    import_twh = energy_import_mwh / 1e6
 
-    exp_int = twh.clip(lower=0)
-    imp_int = -twh.clip(upper=0)
+    annual_net = net_export_twh.resample("YE").sum()
+    annual_exp = export_twh.resample("YE").sum()
+    annual_imp = import_twh.resample("YE").sum()
 
-    annual_net = twh.resample("YE").sum()
-    annual_exp = exp_int.resample("YE").sum()
-    annual_imp = imp_int.resample("YE").sum()
+    # Net exports must equal gross exports minus gross imports for every
+    # neighbour and year. Fail loudly if a future change breaks the convention.
+    _balance_error = (
+        annual_net - (annual_exp - annual_imp)
+    ).abs().max().max()
+    if float(_balance_error) > 1e-9:
+        raise AssertionError(
+            "Trade balance check failed: net exports != exports - imports "
+            f"(maximum error {_balance_error:.3e} TWh)"
+        )
+
     for _d in (annual_net, annual_exp, annual_imp):
         _d.index = _d.index.year
 
@@ -278,7 +342,7 @@ def aggregate(data_ready, energy_mwh, mo, pd):
     partner_exp = annual_exp.sum()
     partner_imp = annual_imp.sum()
 
-    monthly_net = twh.resample("MS").sum()
+    monthly_net = net_export_twh.resample("MS").sum()
     monthly_total = monthly_net.sum(axis=1)
 
     _mt = monthly_total.copy()
