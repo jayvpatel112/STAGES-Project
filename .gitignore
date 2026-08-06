@@ -1,4 +1,4 @@
-# Python cache
+﻿# Python cache
 __pycache__/
 *.py[cod]
 
@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 venv/
 env/
+tutorial-env/
 
 # Marimo session files
 __marimo__/
@@ -34,3 +35,10 @@ analyses/**/figures/*
 !analyses/**/figures/.gitkeep
 analyses/**/reports/*
 !analyses/**/reports/.gitkeep
+
+# Raw SMARD API cache (auto-regenerated, not source)
+smard_cache/
+
+# Auto-exported chart images (generic names, not curated report figures)
+images/
+stages_q3/
