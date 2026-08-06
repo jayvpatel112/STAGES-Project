@@ -1,36 +1,7 @@
-# Python cache
-__pycache__/
-*.py[cod]
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Marimo session files
+﻿tutorial-env/
 __marimo__/
-
-# OS/editor files
+__pycache__/
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# Raw DWD downloaded files
-data/dwd/*_wind/
-data/dwd/*_sun/
-data/dwd/*_solar/
-
-# Generated trade data
-data/cleaned/smard_trade_2025_country_hourly.csv
-
-# Generated outputs from self-contained analyses
-analyses/**/data/_cache/
-analyses/quarterly_2025/q1/data/raw/*
-!analyses/quarterly_2025/q1/data/raw/.gitkeep
-analyses/quarterly_2025/q1/data/processed/*
-!analyses/quarterly_2025/q1/data/processed/.gitkeep
-analyses/**/figures/*
-!analyses/**/figures/.gitkeep
-analyses/**/reports/*
-!analyses/**/reports/.gitkeep
+smard_cache/
+images/
+stages_q3/
