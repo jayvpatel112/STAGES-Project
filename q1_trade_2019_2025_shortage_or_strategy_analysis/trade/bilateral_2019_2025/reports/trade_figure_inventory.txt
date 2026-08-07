@@ -1,0 +1,9 @@
+trade_01_annual_net_balance.png / .pgf
+trade_02_gross_imp_exp.png / .pgf
+trade_03_stacked_by_neighbour.png / .pgf
+trade_04_partners_imp_exp.png / .pgf
+trade_05_net_per_neighbour.png / .pgf
+trade_06_heatmap.png / .pgf
+trade_07_monthly_seasonal.png / .pgf
+trade_08_month_year_heatmap.png / .pgf
+trade_09_relationship_evolution.png / .pgf
