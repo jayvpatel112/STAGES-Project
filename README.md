@@ -56,6 +56,7 @@ STAGES-Project/
 | `q1_trade_2019_2025_shortage_or_strategy_analysis/trade/trade_2025/trade_2025_analysis.py` | Focused country-level import and export analysis for 2025 |
 | `q1_trade_2019_2025_shortage_or_strategy_analysis/trade/bilateral_2019_2025/bilateral_trade_analysis.py` | Bilateral commercial electricity exchanges between Germany and neighbouring countries, 2019–2025 |
 | `q1_trade_2019_2025_shortage_or_strategy_analysis/trade/shortage_or_strategy_2019_2025/net_importer_analysis.py` | Analysis of the factors associated with Germany's shift to net imports |
+| `q2_smard 2nd april to june 2025/` | Q2 April to june 2025 analysis |
 | `q3_and_storage_analysis/` | Supporting Q3 and storage analyses used in the report |
 | `q4_and_storage_analysis/` | Supporting Q4 and storage analyses used in the report |
 
@@ -95,6 +96,12 @@ Detailed Q1 2025 analysis:
 
 ```bash
 uv run marimo edit q1_trade_2019_2025_shortage_or_strategy_analysis/quarterly_2025/q1/q1_2025_detailed_analysis.py
+```
+
+Detailed Q2 2025 analysis:
+
+```bash
+uv run marimo edit q2_smard 2nd april to june 2025/quater_2_2025.py
 ```
 
 Focused 2025 trade analysis:
